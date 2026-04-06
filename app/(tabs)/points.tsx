@@ -7,6 +7,7 @@ import {
   ImageBackground,
   Modal,
   Pressable,
+  Linking,
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { Image } from "expo-image";
@@ -87,6 +88,7 @@ export default function PointsScreen() {
   const [data, setData] = useState<PointsResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [tierInfoVisible, setTierInfoVisible] = useState(false);
+  const [referralCode, setReferralCode] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activeWallet) return;
@@ -101,18 +103,30 @@ export default function PointsScreen() {
       .finally(() => setLoading(false));
   }, [activeWallet?.walletId]);
 
+  useEffect(() => {
+    if (!activeWallet) return;
+    setReferralCode(null);
+    fetch(
+      `https://api.lucidly.finance/services/user/referral/code?wallet_address=${activeWallet.walletId}`,
+    )
+      .then((r) => r.json())
+      .then((json) => setReferralCode(json?.result?.ref_code ?? null))
+      .catch(() => {});
+  }, [activeWallet?.walletId]);
+
   const totalPoints = data ? parseFloat(data.total_points) : null;
   const dropsTier = data ? parseFloat(data.drops_tier) : null;
-  const referralLink = activeWallet
-    ? `https://lucidly.finance/ref/${activeWallet.walletId.slice(2, 10)}`
-    : "https://lucidly.finance/ref/...";
 
   const handleCopy = async () => {
-    await Clipboard.setStringAsync(referralLink);
+    if (referralCode) await Clipboard.setStringAsync(referralCode);
   };
 
   const handleShareX = () => {
-    // Twitter/X intent — open in browser via Linking if needed
+    if (!referralCode) return;
+    const text = encodeURIComponent(
+      `Use my referral code ${referralCode} to join Lucidly! https://lucidly.finance`,
+    );
+    Linking.openURL(`https://twitter.com/intent/tweet?text=${text}`);
   };
 
   return (
@@ -253,7 +267,7 @@ export default function PointsScreen() {
           <View style={styles.referralRow}>
             <View style={styles.linkBox}>
               <Text style={styles.linkText} numberOfLines={1}>
-                {referralLink}
+                {referralCode ?? "..."}
               </Text>
             </View>
             <TouchableOpacity
