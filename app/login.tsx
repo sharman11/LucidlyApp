@@ -236,7 +236,7 @@ export default function LoginScreen() {
         "This wallet address is already linked to your account.",
         [
           { text: "Cancel", style: "cancel" },
-          { text: "View Portfolio", onPress: () => router.replace("/(tabs)/") },
+          { text: "View Portfolio", onPress: () => router.replace("/(tabs)/portfolio") },
         ],
       );
       return;
@@ -265,7 +265,7 @@ export default function LoginScreen() {
               { text: "Cancel", style: "cancel" },
               {
                 text: "View Portfolio",
-                onPress: () => router.replace("/(tabs)/"),
+                onPress: () => router.replace("/(tabs)/portfolio"),
               },
             ],
           );
@@ -303,7 +303,7 @@ export default function LoginScreen() {
             { text: "Cancel", style: "cancel" },
             {
               text: "View Portfolio",
-              onPress: () => router.replace("/(tabs)/"),
+              onPress: () => router.replace("/(tabs)/portfolio"),
             },
           ],
         );

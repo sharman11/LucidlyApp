@@ -39,7 +39,7 @@ export default function WalletSuccessScreen() {
 
       <TouchableOpacity
         style={styles.button}
-        onPress={() => router.replace('/(tabs)/')}
+        onPress={() => router.replace('/(tabs)/portfolio')}
         activeOpacity={0.8}
       >
         <Text style={styles.buttonText}>Go to Dashboard</Text>
