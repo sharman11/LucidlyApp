@@ -7,6 +7,7 @@ import {
   ScrollView,
   StyleSheet,
   ActivityIndicator,
+  Linking,
 } from "react-native";
 import { Image } from "expo-image";
 import { router } from "expo-router";
@@ -510,7 +511,7 @@ export default function PortfolioScreen() {
           <PlusIcon />
         </TouchableOpacity>
         <Text style={styles.walletName}>{activeWallet.name}</Text>
-        <TouchableOpacity activeOpacity={0.7}>
+        <TouchableOpacity activeOpacity={0.7} onPress={() => Linking.openURL("https://t.me/lucidlyfi")}>
           <SupportIcon />
         </TouchableOpacity>
       </View>
