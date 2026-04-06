@@ -1,8 +1,8 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import Svg, { Path, Circle } from 'react-native-svg';
-import { router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import React from "react";
+import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
+import Svg, { Path, Circle } from "react-native-svg";
+import { router } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 function CheckIcon() {
   return (
@@ -26,7 +26,10 @@ export default function WalletSuccessScreen() {
     <View
       style={[
         styles.container,
-        { paddingTop: insets.top, paddingBottom: Math.max(insets.bottom, 16) + 16 },
+        {
+          paddingTop: insets.top,
+          paddingBottom: Math.max(insets.bottom, 16) + 16,
+        },
       ]}
     >
       <View style={styles.content}>
@@ -39,10 +42,10 @@ export default function WalletSuccessScreen() {
 
       <TouchableOpacity
         style={styles.button}
-        onPress={() => router.replace('/(tabs)/portfolio')}
+        onPress={() => router.replace("/(tabs)/portfolio")}
         activeOpacity={0.8}
       >
-        <Text style={styles.buttonText}>Go to Dashboard</Text>
+        <Text style={styles.buttonText}>Go to Portfolio</Text>
       </TouchableOpacity>
     </View>
   );
@@ -51,36 +54,36 @@ export default function WalletSuccessScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F4F0FF',
+    backgroundColor: "#F4F0FF",
     paddingHorizontal: 20,
-    justifyContent: 'space-between',
+    justifyContent: "space-between",
   },
   content: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     gap: 16,
   },
   title: {
     fontSize: 24,
-    fontFamily: 'HankenGrotesk_700Bold',
-    color: '#000000',
+    fontFamily: "HankenGrotesk_700Bold",
+    color: "#000000",
     marginTop: 8,
   },
   subtitle: {
     fontSize: 14,
-    fontFamily: 'HankenGrotesk_400Regular',
-    color: '#626066',
-    textAlign: 'center',
+    fontFamily: "HankenGrotesk_400Regular",
+    color: "#626066",
+    textAlign: "center",
     lineHeight: 22,
     paddingHorizontal: 24,
   },
   button: {
-    backgroundColor: '#E2D9F9',
+    backgroundColor: "#E2D9F9",
     borderRadius: 100,
     paddingVertical: 18,
-    alignItems: 'center',
-    shadowColor: '#000000',
+    alignItems: "center",
+    shadowColor: "#000000",
     shadowOffset: { width: 4, height: 4 },
     shadowOpacity: 0.05,
     shadowRadius: 5,
@@ -88,8 +91,8 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     fontSize: 16,
-    fontFamily: 'HankenGrotesk_600SemiBold',
-    color: '#7F56D9',
+    fontFamily: "HankenGrotesk_600SemiBold",
+    color: "#7F56D9",
     letterSpacing: 0.2,
   },
 });

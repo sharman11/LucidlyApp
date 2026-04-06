@@ -256,20 +256,9 @@ export default function LoginScreen() {
           (w) => w.wallet_address.toLowerCase() === trimmedId.toLowerCase(),
         );
         if (match) {
-          // Wallet is on the server — add locally and navigate
+          // Wallet is on the server but not locally — add it and continue normally
           addWallet(match.wallet_address, match.wallet_name || trimmedName);
-          Alert.alert(
-            "Wallet Already Connected",
-            "This wallet is already linked to your account. You can view it in your portfolio.",
-            [
-              { text: "Cancel", style: "cancel" },
-              {
-                text: "View Portfolio",
-                onPress: () => router.replace("/(tabs)/portfolio"),
-              },
-            ],
-          );
-          setLoading(false);
+          router.replace("/wallet-success");
           return;
         }
       }
@@ -295,18 +284,9 @@ export default function LoginScreen() {
       }
 
       if (res.status === 409) {
+        // Server already has it — add locally and continue normally
         addWallet(trimmedId, trimmedName);
-        Alert.alert(
-          "Wallet Already Connected",
-          "This wallet is already linked to your account. You can view it in your portfolio.",
-          [
-            { text: "Cancel", style: "cancel" },
-            {
-              text: "View Portfolio",
-              onPress: () => router.replace("/(tabs)/portfolio"),
-            },
-          ],
-        );
+        router.replace("/wallet-success");
         return;
       }
 
