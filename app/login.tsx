@@ -256,8 +256,8 @@ export default function LoginScreen() {
           (w) => w.wallet_address.toLowerCase() === trimmedId.toLowerCase(),
         );
         if (match) {
-          // Wallet is on the server but not locally — add it and continue normally
-          addWallet(match.wallet_address, match.wallet_name || trimmedName);
+          // Wallet is on the server but not locally — add with user's chosen name
+          addWallet(match.wallet_address, trimmedName);
           router.replace("/wallet-success");
           return;
         }

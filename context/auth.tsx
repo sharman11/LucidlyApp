@@ -59,7 +59,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const persist = async (updated: Wallet[], activeId: string | null) => {
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      if (activeId) await AsyncStorage.setItem(ACTIVE_KEY, activeId);
+      if (activeId) {
+        await AsyncStorage.setItem(ACTIVE_KEY, activeId);
+      } else {
+        await AsyncStorage.removeItem(ACTIVE_KEY);
+      }
     } catch {
       // silently ignore
     }
@@ -70,9 +74,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const exists = prev.some((w) => w.walletId === walletId);
       if (exists) return prev;
       const updated = [...prev, { walletId, name }];
-      const newActive = prev.length === 0 ? walletId : activeWalletId;
-      persist(updated, newActive);
-      if (prev.length === 0) setActiveWalletIdState(walletId);
+      // Always set the newly added wallet as active
+      persist(updated, walletId);
+      setActiveWalletIdState(walletId);
       return updated;
     });
   };
