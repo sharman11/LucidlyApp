@@ -12,8 +12,10 @@ interface Wallet {
 interface AuthContextType {
   wallets: Wallet[];
   activeWalletId: string | null;
+  ready: boolean;
   addWallet: (walletId: string, name: string) => void;
   removeWallet: (walletId: string) => void;
+  renameWallet: (walletId: string, name: string) => void;
   setActiveWallet: (walletId: string) => void;
   logout: () => void;
 }
@@ -21,8 +23,10 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
   wallets: [],
   activeWalletId: null,
+  ready: false,
   addWallet: () => {},
   removeWallet: () => {},
+  renameWallet: () => {},
   setActiveWallet: () => {},
   logout: () => {},
 });
@@ -30,6 +34,7 @@ const AuthContext = createContext<AuthContextType>({
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [activeWalletId, setActiveWalletIdState] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
 
   // Load from storage on mount
   useEffect(() => {
@@ -51,6 +56,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       } catch {
         // silently ignore
+      } finally {
+        setReady(true);
       }
     }
     load();
@@ -94,6 +101,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
+  const renameWallet = (walletId: string, name: string) => {
+    setWallets((prev) => {
+      const updated = prev.map((w) =>
+        w.walletId === walletId ? { ...w, name } : w,
+      );
+      persist(updated, activeWalletId);
+      return updated;
+    });
+  };
+
   const setActiveWallet = (walletId: string) => {
     setActiveWalletIdState(walletId);
     AsyncStorage.setItem(ACTIVE_KEY, walletId).catch(() => {});
@@ -106,7 +123,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ wallets, activeWalletId, addWallet, removeWallet, setActiveWallet, logout }}>
+    <AuthContext.Provider value={{ wallets, activeWalletId, ready, addWallet, removeWallet, renameWallet, setActiveWallet, logout }}>
       {children}
     </AuthContext.Provider>
   );

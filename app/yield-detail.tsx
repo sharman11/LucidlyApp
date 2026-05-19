@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Linking } from "react-native";
 import * as Clipboard from "expo-clipboard";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   View,
   Text,
@@ -10,18 +9,33 @@ import {
   Modal,
   ScrollView,
   ImageBackground,
-  ActivityIndicator,
+  Animated,
+  Easing,
 } from "react-native";
 import { Image } from "expo-image";
 import { router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/context/auth";
+import { API_BASE, DEVICE_ID, VAULTS, ARCHIVED_VAULTS } from "@/constants/api";
 import { AreaChart } from "@/components/ui/area-chart";
-import Svg, { Path } from "react-native-svg";
+import { Skeleton } from "@/components/ui/skeleton";
+import { SpinningLogoEgg } from "@/components/ui/spinning-logo-egg";
+import { WiggleHint } from "@/components/ui/wiggle-hint";
+import {
+  isSpinnerDiscovered,
+  markSpinnerDiscovered,
+} from "@/lib/spinner-discovery";
+import Svg, { Path, Line } from "react-native-svg";
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
 
-type VaultType = "syUSD" | "syETH" | "syBTC";
+type VaultType =
+  | "syUSD"
+  | "syETH"
+  | "syBTC"
+  | "cyBTC"
+  | "cyETH"
+  | "jrRoyUSDC";
 
 const VAULT_STATIC: Record<
   VaultType,
@@ -42,22 +56,93 @@ const VAULT_STATIC: Record<
     icon: require("../assets/sybtcIcon.svg"),
     defaultName: "Stable Yield BTC",
   },
+  cyBTC: {
+    address: "0x272BCD869CbDFcb32c335dB2f1F6C54Eb1A50aCc",
+    icon: require("../assets/cyBTCIcon.svg"),
+    defaultName: "Carry Yield BTC",
+  },
+  cyETH: {
+    address: "0x5373690c930553648f0aaA2e53B51f0C59290B7d",
+    icon: require("../assets/cyETHIcon.svg"),
+    defaultName: "Carry Yield ETH",
+  },
+  jrRoyUSDC: {
+    address: "0x71861827Aa95cA48148bdA0b40BC740d1c421070",
+    icon: require("../assets/jrRoyIcon.svg"),
+    defaultName: "Junior Royco USDC Vault",
+  },
 };
 
-const DETAIL_TABS = [
+// Default tab set (syUSD / stable-yield vaults).
+const TABS_DEFAULT = [
   "TVL",
   "APY",
   "Allocations",
   "Attribution",
-  "Invcentives",
+  "Incentives",
   "Details",
   "FAQ",
 ];
 
-const SCROLLABLE_TABS = ["Invcentives", "Details", "FAQ"];
+// Carry-yield vaults (cyBTC / cyETH) — Incentives replaced by Health Info.
+const TABS_CARRY = [
+  "TVL",
+  "APY",
+  "Allocations",
+  "Attribution",
+  "Health Info",
+  "Details",
+  "FAQ",
+];
+
+function tabsForVault(vault: VaultType): string[] {
+  return vault === "cyBTC" || vault === "cyETH" ? TABS_CARRY : TABS_DEFAULT;
+}
+
+// Strategy-type badge shown in the detail header — rendered at each SVG's
+// native size.
+const TAG_FLAGSHIP = {
+  source: require("../assets/flagshipTag.svg"),
+  width: 90,
+  height: 24,
+};
+const TAG_LOOP = {
+  source: require("../assets/loopTag.svg"),
+  width: 140,
+  height: 24,
+};
+const TAG_DELTA = {
+  source: require("../assets/deltaTag.svg"),
+  width: 122,
+  height: 24,
+};
+const TAG_TRANCHES = {
+  source: require("../assets/tranchesTag.svg"),
+  width: 122,
+  height: 24,
+};
+
+const VAULT_TAG: Record<
+  VaultType,
+  { source: number; width: number; height: number }
+> = {
+  syUSD: TAG_FLAGSHIP,
+  syETH: TAG_FLAGSHIP,
+  syBTC: TAG_FLAGSHIP,
+  cyBTC: TAG_LOOP,
+  cyETH: TAG_LOOP,
+  jrRoyUSDC: TAG_TRANCHES,
+};
+
+const SCROLLABLE_TABS = ["Incentives", "Details", "FAQ"];
 
 const ACTIVE_COLOR = "#7F56D9";
 const INACTIVE_COLOR = "#353140";
+
+// Per-vault accent color (matches the Yields card name color).
+const VAULT_ACCENT: Record<string, string> = Object.fromEntries(
+  [...VAULTS, ...ARCHIVED_VAULTS].map((v) => [v.type, v.nameColor]),
+);
 
 const STATIC_INCENTIVES: Record<VaultType, IncentivePoint[]> = {
   syUSD: [
@@ -70,12 +155,129 @@ const STATIC_INCENTIVES: Record<VaultType, IncentivePoint[]> = {
     {
       name: "InfiniFi Points",
       description: "Points earned through protocol fund allocation",
-      image: "https://app.lucidly.finance/images/icons/infini.svg",
-      multiplier: 1,
+      image: require("../assets/infinifiIcon.svg"),
+      multiplier: 12,
     },
   ],
   syETH: [],
   syBTC: [],
+  cyBTC: [],
+  cyETH: [],
+  jrRoyUSDC: [],
+};
+
+// Display-fee overrides — the API's vault_config can be stale; these take
+// precedence over the fetched management/performance fee values.
+const FEE_OVERRIDES: Partial<
+  Record<VaultType, { managementFee?: string; performanceFee?: string }>
+> = {
+  syUSD: { managementFee: "0", performanceFee: "10" },
+  jrRoyUSDC: { managementFee: "0", performanceFee: "10" },
+};
+
+// Static Details overrides — for vaults whose vault_config is missing or stale.
+// Any field present here takes precedence over the fetched value.
+const DETAILS_OVERRIDES: Partial<
+  Record<
+    VaultType,
+    Partial<
+      Pick<
+        VaultDetails,
+        | "auditedBy"
+        | "deploymentDate"
+        | "rateProvider"
+        | "feeReceipt"
+        | "ownerAddress"
+      >
+    >
+  >
+> = {
+  jrRoyUSDC: {
+    auditedBy: "Pashov",
+    deploymentDate: "7 April 2026",
+    rateProvider: "0x0142d7E0787498c523c5E21c5BeCe9afDD82C6a3",
+    feeReceipt: "0x78acDecABb2Faa7d811b02937Db3806968c7dc2b",
+    ownerAddress: "0x0000000000000000000000000000000000000000",
+  },
+};
+
+// FAQ overrides — the API's vault_config FAQs can be stale; when an entry
+// exists here it fully replaces the fetched FAQ list for that vault.
+const FAQ_OVERRIDES: Partial<Record<VaultType, FaqItem[]>> = {
+  syUSD: [
+    {
+      question: "What is syUSD and how does it work?",
+      answer:
+        "syUSD is a USDC denominated yield token designed to earn risk adjusted returns across multiple bluechip DeFi protocols. It allocates deposits to leverage positions on lending markets like Morpho and AaveV3, combined with delta neutral strategies to generate yield while maintaining USD stability.",
+    },
+    {
+      question: "How is the yield generated?",
+      answer:
+        "The strategy generates yield through leveraged loop positions, and delta neutral arbitrage opportunities. Allocation decisions are made by the Lucidly team focusing on strategies with the lowest execution costs and highest risk adjusted returns.",
+    },
+    {
+      question: "What are the main risks?",
+      answer:
+        "Key risks include smart contract vulnerabilities in underlying protocols, liquidation risk from leveraged positions (mitigated by safeguards), and temporary depegging of stablecoins. The vault only takes exposure to bluechip collaterals to minimize risk.",
+    },
+    {
+      question: "How liquid is my position?",
+      answer:
+        "syUSD is fully liquid, you can redeem your position at any time through the Lucidly app. All transactions are executed onchain and can be verified via third-party portfolio indexers like DeBank.",
+    },
+    {
+      question: "Who manages the strategy allocations?",
+      answer:
+        "All allocation decisions are made by the Lucidly team using offchain algorithms for optimal capital deployment. The Manager smart contract executes transactions verified by Merkle proofs, with the vault restricted to calling whitelisted calldata.",
+    },
+    {
+      question: "Are there any fees?",
+      answer:
+        "Yes, Lucidly charges a 10% performance fee on yield generated, there is NO management fee. Exact fee structures are displayed in the app before depositing and are competitive with institutional grade yield products.",
+    },
+    {
+      question: "What is fast redeem?",
+      answer:
+        "Fast Redeem enables near-instant withdrawals using the vault's reserved USDC buffer. If your withdrawal amount is within the available buffer, it will be processed in the next cycle without impacting active strategies or requiring any position unwinding.",
+    },
+  ],
+  jrRoyUSDC: [
+    {
+      question: "What is Royco Jr USDC?",
+      answer:
+        "jrROYCO USDC is a Lucidly-managed USDC yield vault that takes structured first-loss positions on Royco Dawn's risk-tranched markets. You deposit USDC and receive jrROYCO USDC share tokens, which accrue value as the vault earns yield. The vault deploys into Junior tranches across three underlying yield sources (syrupUSDC, usdAI, and scUSD) and earns a continuously-paid risk premium from the corresponding Senior tranches in exchange for absorbing first-dollar losses on the underlying. Target net APY is ~10%.",
+    },
+    {
+      question: "What does first-loss actually mean?",
+      answer:
+        "Royco Dawn splits a single yield source into two risk slices: Senior and Junior. Senior holders earn a protected, lower yield. Junior holders (like this vault) act as first-loss capital: if the underlying strategy suffers a credit event or persistent drawdown, Junior absorbs those losses before Senior is ever touched, starting from the very first dollar. In exchange, Junior earns the full base yield of the underlying plus a risk premium paid continuously by Senior holders. The premium widens when Junior capital is scarce and tightens when abundant, creating a dynamic equilibrium. Dawn also has an observation window. Temporary volatility that reverses within the window does not impair Junior. Only persistent, realized losses are allocated to Junior.",
+    },
+    {
+      question: "Where does the yield come from?",
+      answer:
+        "The vault earns from three stacked components. First, base underlying yield: the lending or RWA yield each strategy produces (e.g. Maple borrower coupons inside syrupUSDC, compute-collateralized yield from usdAI, Sonic-native yield from scUSD). Second, a risk premium from Senior: a continuous spread paid by Senior holders to Junior for first-loss coverage, sized by Dawn's dynamic distribution curve. Third, capital efficiency from tranching: Junior backs a multiple of its own notional in Senior exposure, amplifying effective yield versus holding the underlying directly. Yield accrues to NAV block-by-block, so the jrROYCO USDC exchange rate increases continuously.",
+    },
+    {
+      question: "How does this relate to Dialectic's srRoyUSDC?",
+      answer:
+        "srRoyUSDC is the Senior counterparty vault, curated by Dialectic. It deposits into Senior tranches and earns a protected, lower yield, with Junior capital sitting underneath it as a buffer. jrROYCO USDC is the direct counterparty to that product. Without sufficient Junior capital, the Senior vault cannot scale and its yield compresses. By deploying first-loss capital into the same Royco markets, Lucidly's vault sits on the other side of the trade, taking on the structurally higher risk-adjusted yield in exchange for absorbing the tail risk Senior is paying to avoid. Same instrument, opposite tranche.",
+    },
+    {
+      question: "How do deposits and redemptions work?",
+      answer:
+        "Deposits are atomic: you deposit USDC and immediately receive jrROYCO USDC shares at the current exchange rate. The Lucidly strategist then routes USDC into the underlying assets and submits a deposit request to the Royco EntryPoint in the background. This delay is an internal allocation step and does not affect your shares. Redemptions follow a two-stage flow: you submit a withdrawal request to the Lucidly Queue, the solver batches it and calls requestRedemption on the Royco EntryPoint, and after Dawn's redemption delay your USDC is delivered. Total wait time is typically 24 to 72 hours depending on the market being unwound and queue batching. Cancellation hooks exist at every stage as a safeguard.",
+    },
+    {
+      question: "How is the vault secured?",
+      answer:
+        "Royco Junior USDC runs on the same Boring Vault architecture as Lucidly's other products, with all permissions gated by a merkle tree of pre-approved actions. Every on-chain action (approve, deposit, requestDeposit, executeDeposit, requestRedemption, cancel) must validate against the deployed leaf set. The strategist cannot add new venues or move capital outside the whitelisted call graph. The MPC owner key holds vault ownership while a separate strategy-manager role executes within the merkle root. Operational keys are stored in AWS KMS, never in plaintext. Any new underlying venue requires a 48-hour timelock before being added, and cancellation paths are whitelisted as escape hatches for stuck or mispriced requests.",
+    },
+    {
+      question: "What are the main risks I should know about?",
+      answer:
+        "First-loss exposure: if syrupUSDC, usdAI, or scUSD suffers a credit event or persistent drawdown beyond Dawn's observation window, the loss is absorbed by Junior (this vault) pro-rata before Senior is touched. Observation-window risk: transient volatility is protected, but a drawdown that survives the window becomes a permanent reduction in Junior NAV. Smart contract risk: three layers exist (the Lucidly Boring Vault, Royco Dawn's tranche contracts, and the underlying protocols); each is independently audited but the composition adds surface area. Liquidity risk in stress: during a drawdown-and-observation period, the strategist may pause or queue redemptions to avoid forced liquidation at impaired prices. This is a higher-risk product than syUSD. Capital is exposed to the possibility of permanent principal loss and is appropriate only for capital that can tolerate drawdown in exchange for double-digit USD yield.",
+    },
+  ],
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -84,6 +286,65 @@ function formatTVL(value: number): string {
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `$${Math.round(value / 1_000)}K`;
   return `$${Math.round(value).toLocaleString("en-US")}`;
+}
+
+// ─── Skeleton variants & FadeIn ──────────────────────────────────────────────
+
+function SkeletonChart() {
+  return (
+    <View style={{ flex: 1, padding: 16, gap: 12 }}>
+      <Skeleton width={100} height={16} borderRadius={6} />
+      <Skeleton width={140} height={10} borderRadius={4} />
+      <View style={{ flex: 1, justifyContent: "flex-end" }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 2, height: "80%" }}>
+          {Array.from({ length: 20 }).map((_, i) => (
+            <Skeleton key={i} width={0} height={[40, 60, 50, 80, 70, 30, 90, 55, 65, 45, 75, 85, 50, 60, 40, 70, 35, 80, 65, 50][i % 20]} borderRadius={3} style={{ flex: 1 }} />
+          ))}
+        </View>
+      </View>
+      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Skeleton key={i} width={36} height={8} borderRadius={3} />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function SkeletonLines({ count = 4 }: { count?: number }) {
+  return (
+    <View style={{ padding: 16, gap: 16 }}>
+      {Array.from({ length: count }).map((_, i) => (
+        <View key={i} style={{ gap: 6 }}>
+          <Skeleton width={80} height={10} borderRadius={4} />
+          <Skeleton width={200 - i * 20} height={14} borderRadius={4} />
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function FadeIn({ children, visible }: { children: React.ReactNode; visible: boolean }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (visible) {
+      opacity.setValue(0);
+      Animated.timing(opacity, { toValue: 1, duration: 400, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+    }
+  }, [visible]);
+  if (!visible) return null;
+  return <Animated.View style={{ flex: 1, opacity }}>{children}</Animated.View>;
+}
+
+function ErrorRetry({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10 }}>
+      <Text style={{ fontSize: 13, fontFamily: "HankenGrotesk_500Medium", color: "#9B97A6" }}>{message}</Text>
+      <TouchableOpacity onPress={onRetry} activeOpacity={0.7} style={{ paddingHorizontal: 16, paddingVertical: 8, borderRadius: 100, backgroundColor: "#E2D9F9" }}>
+        <Text style={{ fontSize: 12, fontFamily: "HankenGrotesk_600SemiBold", color: "#7F56D9" }}>Tap to retry</Text>
+      </TouchableOpacity>
+    </View>
+  );
 }
 
 // ─── Nav Icons (mirrored from custom-tab-bar) ─────────────────────────────────
@@ -146,20 +407,46 @@ function WalletIcon({ color }: { color: string }) {
 
 // ─── TVL Chart ────────────────────────────────────────────────────────────────
 
-type TvlPoint = { date: string; tvl: number };
+type TvlPoint = { date: string; usd: number; base: number };
 
-function TVLChart({ data, loading }: { data: TvlPoint[]; loading: boolean }) {
+function TVLChart({
+  data,
+  loading,
+  baseCurrency,
+}: {
+  data: TvlPoint[];
+  loading: boolean;
+  baseCurrency: string;
+}) {
   const [selectedBar, setSelectedBar] = useState<number | null>(null);
   const [barsLayout, setBarsLayout] = useState({ width: 0, height: 0 });
+  const [currency, setCurrency] = useState<"USD" | "BASE">("USD");
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Carry vaults have a non-USD base currency (BTC/ETH) → offer a toggle.
+  const hasToggle =
+    baseCurrency !== "" && baseCurrency.toUpperCase() !== "USD";
+  const showBase = hasToggle && currency === "BASE";
+
   const points = data.slice(-45);
-  const max = Math.max(...points.map((p) => p.tvl), 0.001);
+  const valueOf = (p: TvlPoint) => (showBase ? p.base : p.usd);
+  const max = Math.max(...points.map(valueOf), 0);
 
   const displayValue =
     selectedBar !== null
-      ? (points[selectedBar]?.tvl ?? 0)
-      : (points[points.length - 1]?.tvl ?? 0);
+      ? valueOf(points[selectedBar] ?? points[points.length - 1] ?? { date: "", usd: 0, base: 0 })
+      : valueOf(points[points.length - 1] ?? { date: "", usd: 0, base: 0 });
+
+  const formatValue = (v: number) =>
+    showBase
+      ? `${v.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 6,
+        })} ${baseCurrency.toUpperCase()}`
+      : `$${v.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
 
   const displayDate =
     selectedBar !== null && points[selectedBar]
@@ -196,13 +483,7 @@ function TVLChart({ data, loading }: { data: TvlPoint[]; loading: boolean }) {
       .toUpperCase()}`;
   };
 
-  if (loading) {
-    return (
-      <View style={tvlStyles.center}>
-        <ActivityIndicator color="#7F56D9" />
-      </View>
-    );
-  }
+  if (loading) return <SkeletonChart />;
 
   if (points.length === 0) {
     return (
@@ -212,18 +493,47 @@ function TVLChart({ data, loading }: { data: TvlPoint[]; loading: boolean }) {
     );
   }
 
+  const CURRENCY_OPTS: Array<{ key: "USD" | "BASE"; label: string }> = [
+    { key: "USD", label: "USD" },
+    { key: "BASE", label: baseCurrency.toUpperCase() },
+  ];
+
   return (
+    <FadeIn visible={points.length > 0}>
     <View style={tvlStyles.container}>
-      {/* Value + date */}
+      {/* Value + date, with optional currency toggle */}
       <View style={tvlStyles.topRow}>
-        <Text style={tvlStyles.valueText}>
-          $
-          {displayValue.toLocaleString("en-US", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          })}
-        </Text>
-        <Text style={tvlStyles.dateText}>{displayDate}</Text>
+        <View>
+          <Text style={tvlStyles.valueText}>{formatValue(displayValue)}</Text>
+          <Text style={tvlStyles.dateText}>{displayDate}</Text>
+        </View>
+        {hasToggle && (
+          <View style={tvlStyles.currencySwitch}>
+            {CURRENCY_OPTS.map((opt) => {
+              const active = currency === opt.key;
+              return (
+                <TouchableOpacity
+                  key={opt.key}
+                  activeOpacity={0.8}
+                  onPress={() => setCurrency(opt.key)}
+                  style={[
+                    tvlStyles.currencyTab,
+                    active && tvlStyles.currencyTabActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      tvlStyles.currencyTabText,
+                      active && tvlStyles.currencyTabTextActive,
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
       </View>
 
       {/* Bars */}
@@ -238,7 +548,10 @@ function TVLChart({ data, loading }: { data: TvlPoint[]; loading: boolean }) {
       >
         {barsLayout.height > 0 &&
           points.map((point, i) => {
-            const barH = Math.max(4, (point.tvl / max) * barsLayout.height);
+            const barH =
+              max > 0
+                ? Math.max(4, (valueOf(point) / max) * barsLayout.height)
+                : 4;
             const isSelected = selectedBar === i;
             return (
               <TouchableOpacity
@@ -273,6 +586,7 @@ function TVLChart({ data, loading }: { data: TvlPoint[]; loading: boolean }) {
         ))}
       </View>
     </View>
+    </FadeIn>
   );
 }
 
@@ -287,6 +601,9 @@ const tvlStyles = StyleSheet.create({
   },
   topRow: {
     marginBottom: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
   valueText: {
     fontSize: 14,
@@ -298,6 +615,30 @@ const tvlStyles = StyleSheet.create({
     fontFamily: "HankenGrotesk_400Regular",
     color: "#626066",
     marginTop: 1,
+  },
+  currencySwitch: {
+    flexDirection: "row",
+    backgroundColor: "#E8E2F4",
+    borderRadius: 100,
+    padding: 2,
+    alignSelf: "flex-start",
+  },
+  currencyTab: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 100,
+  },
+  currencyTabActive: {
+    backgroundColor: "#FFFFFF",
+  },
+  currencyTabText: {
+    fontSize: 11,
+    fontFamily: "HankenGrotesk_500Medium",
+    color: "#9B97A6",
+  },
+  currencyTabTextActive: {
+    color: "#1A1A2E",
+    fontFamily: "HankenGrotesk_600SemiBold",
   },
   barsArea: {
     flex: 1,
@@ -328,8 +669,24 @@ const tvlStyles = StyleSheet.create({
 // ─── APY Chart ────────────────────────────────────────────────────────────────
 
 type ApyPoint = { timestamp: string; apy: number };
+type ApyMaWindow = "7d" | "30d";
 
-function APYChart({ data, loading }: { data: ApyPoint[]; loading: boolean }) {
+const APY_MA_OPTS: Array<{ key: ApyMaWindow; label: string }> = [
+  { key: "7d", label: "7D MA" },
+  { key: "30d", label: "30D MA" },
+];
+
+function APYChart({
+  data,
+  loading,
+  maWindow,
+  onMaWindowChange,
+}: {
+  data: ApyPoint[];
+  loading: boolean;
+  maWindow: ApyMaWindow;
+  onMaWindowChange: (w: ApyMaWindow) => void;
+}) {
   const [chartLayout, setChartLayout] = useState({ width: 0, height: 0 });
 
   const points = data.slice(-180);
@@ -354,13 +711,7 @@ function APYChart({ data, loading }: { data: ApyPoint[]; loading: boolean }) {
       .toUpperCase()}`;
   };
 
-  if (loading) {
-    return (
-      <View style={apyStyles.center}>
-        <ActivityIndicator color="#7F56D9" />
-      </View>
-    );
-  }
+  if (loading) return <SkeletonChart />;
 
   if (points.length === 0) {
     return (
@@ -371,10 +722,38 @@ function APYChart({ data, loading }: { data: ApyPoint[]; loading: boolean }) {
   }
 
   return (
+    <FadeIn visible={points.length > 0}>
     <View style={apyStyles.container}>
       <View style={apyStyles.header}>
-        <Text style={apyStyles.valueText}>{displayValue.toFixed(2)}%</Text>
-        <Text style={apyStyles.dateText}>{displayDate}</Text>
+        <View>
+          <Text style={apyStyles.valueText}>{displayValue.toFixed(2)}%</Text>
+          <Text style={apyStyles.dateText}>{displayDate}</Text>
+        </View>
+        <View style={apyStyles.maSwitch}>
+          {APY_MA_OPTS.map((opt) => {
+            const active = maWindow === opt.key;
+            return (
+              <TouchableOpacity
+                key={opt.key}
+                activeOpacity={0.8}
+                onPress={() => onMaWindowChange(opt.key)}
+                style={[
+                  apyStyles.maTab,
+                  active && apyStyles.maTabActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    apyStyles.maTabText,
+                    active && apyStyles.maTabTextActive,
+                  ]}
+                >
+                  {opt.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       </View>
       <View
         style={apyStyles.chartArea}
@@ -407,6 +786,7 @@ function APYChart({ data, loading }: { data: ApyPoint[]; loading: boolean }) {
         ))}
       </View>
     </View>
+    </FadeIn>
   );
 }
 
@@ -421,6 +801,33 @@ const apyStyles = StyleSheet.create({
   },
   header: {
     marginBottom: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  maSwitch: {
+    flexDirection: "row",
+    backgroundColor: "#E8E2F4",
+    borderRadius: 100,
+    padding: 2,
+    alignSelf: "flex-start",
+  },
+  maTab: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 100,
+  },
+  maTabActive: {
+    backgroundColor: "#FFFFFF",
+  },
+  maTabText: {
+    fontSize: 11,
+    fontFamily: "HankenGrotesk_500Medium",
+    color: "#9B97A6",
+  },
+  maTabTextActive: {
+    color: "#1A1A2E",
+    fontFamily: "HankenGrotesk_600SemiBold",
   },
   valueText: {
     fontSize: 14,
@@ -472,13 +879,15 @@ const ALLOC_COLORS = [
 function AllocationsChart({
   data,
   loading,
+  days = 45,
 }: {
   data: AllocPoint[];
   loading: boolean;
+  days?: number;
 }) {
   const [barsLayout, setBarsLayout] = useState({ width: 0, height: 0 });
 
-  const points = data.slice(-45);
+  const points = data.slice(-days);
 
   const allNames = Array.from(
     new Set(points.flatMap((p) => p.allocations.map((a) => a.allocation))),
@@ -504,13 +913,7 @@ function AllocationsChart({
       .toUpperCase()}`;
   };
 
-  if (loading) {
-    return (
-      <View style={allocStyles.center}>
-        <ActivityIndicator color="#7F56D9" />
-      </View>
-    );
-  }
+  if (loading) return <SkeletonChart />;
 
   if (points.length === 0) {
     return (
@@ -676,12 +1079,289 @@ const allocStyles = StyleSheet.create({
   },
 });
 
+// ─── Carry Allocations (Assets & Liabilities + Holdings) ─────────────────────
+
+const ALLOC_VIEWS = ["Assets & liabilities", "Holdings"] as const;
+type AllocView = (typeof ALLOC_VIEWS)[number];
+
+type DualPoint = { date: string; assets: number; liabilities: number };
+
+function AssetsLiabilitiesChart({
+  data,
+  loading,
+}: {
+  data: DualPoint[];
+  loading: boolean;
+}) {
+  const [chartLayout, setChartLayout] = useState({ width: 0, height: 0 });
+
+  if (loading) return <SkeletonChart />;
+
+  if (data.length < 2) {
+    return (
+      <View style={faqStyles.center}>
+        <Text style={faqStyles.emptyText}>No data available</Text>
+      </View>
+    );
+  }
+
+  const allVals = data.flatMap((d) => [d.assets, d.liabilities]);
+  const rawMin = Math.min(...allVals);
+  const rawMax = Math.max(...allVals);
+  const pad = (rawMax - rawMin) * 0.18 || 10;
+  const yMin = Math.max(0, rawMin - pad);
+  const yMax = rawMax + pad;
+
+  const GRID = 5;
+  const gridValues = Array.from({ length: GRID }, (_, i) =>
+    yMax - ((yMax - yMin) / (GRID - 1)) * i,
+  );
+
+  const labelIndices = [0, 0.25, 0.5, 0.75, 1]
+    .map((f) => Math.round(f * (data.length - 1)))
+    .filter((v, i, arr) => v < data.length && arr.indexOf(v) === i);
+
+  const formatLabel = (ts: string) => {
+    const d = new Date(ts);
+    return `${d.getDate()} ${d
+      .toLocaleString("en-US", { month: "short" })
+      .toUpperCase()}`;
+  };
+
+  const pathFor = (key: "assets" | "liabilities", w: number, h: number) => {
+    const range = yMax - yMin || 1;
+    return data
+      .map((d, i) => {
+        const x = (i / (data.length - 1)) * w;
+        const y = h - ((d[key] - yMin) / range) * h;
+        return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+      })
+      .join(" ");
+  };
+
+  return (
+    <View style={alStyles.container}>
+      <View style={alStyles.chartRow}>
+        <View style={alStyles.yAxis}>
+          {gridValues.map((v, i) => (
+            <Text key={i} style={alStyles.yLabel}>
+              ${Math.round(v)}
+            </Text>
+          ))}
+        </View>
+
+        <View
+          style={alStyles.chartArea}
+          onLayout={(e) =>
+            setChartLayout({
+              width: e.nativeEvent.layout.width,
+              height: e.nativeEvent.layout.height,
+            })
+          }
+        >
+          {chartLayout.width > 0 && chartLayout.height > 0 && (
+            <Svg width={chartLayout.width} height={chartLayout.height}>
+              {gridValues.map((_, i) => {
+                const y =
+                  (chartLayout.height / (GRID - 1)) * i;
+                return (
+                  <Line
+                    key={i}
+                    x1={0}
+                    y1={y}
+                    x2={chartLayout.width}
+                    y2={y}
+                    stroke="#D8D2EC"
+                    strokeWidth={1}
+                    strokeDasharray="4 5"
+                  />
+                );
+              })}
+              <Path
+                d={pathFor("assets", chartLayout.width, chartLayout.height)}
+                stroke="#3FA66A"
+                strokeWidth={2}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <Path
+                d={pathFor(
+                  "liabilities",
+                  chartLayout.width,
+                  chartLayout.height,
+                )}
+                stroke="#4A7DE0"
+                strokeWidth={2}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </Svg>
+          )}
+        </View>
+      </View>
+
+      <View style={alStyles.labelsRow}>
+        {labelIndices.map((idx) => (
+          <Text key={idx} style={alStyles.dateLabel}>
+            {formatLabel(data[idx].date)}
+          </Text>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const Y_AXIS_W = 44;
+
+const alStyles = StyleSheet.create({
+  container: { flex: 1 },
+  chartRow: {
+    flex: 1,
+    flexDirection: "row",
+  },
+  yAxis: {
+    width: Y_AXIS_W,
+    justifyContent: "space-between",
+    paddingVertical: 0,
+  },
+  yLabel: {
+    fontSize: 10,
+    fontFamily: "HankenGrotesk_400Regular",
+    color: "#9B97A6",
+  },
+  chartArea: {
+    flex: 1,
+  },
+  labelsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 8,
+    paddingLeft: Y_AXIS_W,
+  },
+  dateLabel: {
+    fontSize: 10,
+    fontFamily: "HankenGrotesk_400Regular",
+    color: "#9B97A6",
+  },
+});
+
+const ALLOC_WINDOW_DAYS = 45;
+
+function CarryAllocationsTab({
+  allocData,
+  allocLoading,
+  carryData,
+  carryLoading,
+}: {
+  allocData: AllocPoint[];
+  allocLoading: boolean;
+  carryData: DualPoint[];
+  carryLoading: boolean;
+}) {
+  const [view, setView] = useState<AllocView>("Assets & liabilities");
+
+  const dateStr = new Date().toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+
+  return (
+    <View style={carryAllocStyles.container}>
+      {/* Header: date (left, Assets view only) + view switch (right) */}
+      <View style={carryAllocStyles.headerRow}>
+        {view === "Assets & liabilities" ? (
+          <Text style={carryAllocStyles.dateText}>{dateStr}</Text>
+        ) : (
+          <View />
+        )}
+        <View style={carryAllocStyles.viewSwitch}>
+          {ALLOC_VIEWS.map((v) => {
+            const active = v === view;
+            return (
+              <TouchableOpacity
+                key={v}
+                activeOpacity={0.8}
+                onPress={() => setView(v)}
+                style={[
+                  carryAllocStyles.viewTab,
+                  active && carryAllocStyles.viewTabActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    carryAllocStyles.viewTabText,
+                    active && carryAllocStyles.viewTabTextActive,
+                  ]}
+                >
+                  {v}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      {view === "Assets & liabilities" ? (
+        <AssetsLiabilitiesChart data={carryData} loading={carryLoading} />
+      ) : (
+        <AllocationsChart
+          data={allocData}
+          loading={allocLoading}
+          days={ALLOC_WINDOW_DAYS}
+        />
+      )}
+    </View>
+  );
+}
+
+const carryAllocStyles = StyleSheet.create({
+  container: { flex: 1 },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  dateText: {
+    fontSize: 12,
+    fontFamily: "HankenGrotesk_400Regular",
+    color: "#626066",
+  },
+  viewSwitch: {
+    flexDirection: "row",
+    backgroundColor: "#E8E2F4",
+    borderRadius: 100,
+    padding: 2,
+    alignSelf: "flex-start",
+  },
+  viewTab: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 100,
+  },
+  viewTabActive: {
+    backgroundColor: "#FFFFFF",
+  },
+  viewTabText: {
+    fontSize: 11,
+    fontFamily: "HankenGrotesk_500Medium",
+    color: "#9B97A6",
+  },
+  viewTabTextActive: {
+    color: "#1A1A2E",
+    fontFamily: "HankenGrotesk_600SemiBold",
+  },
+});
+
 // ─── Incentives Grid ─────────────────────────────────────────────────────────
 
 type IncentivePoint = {
   name: string;
   description: string;
-  image: string;
+  image: string | number;
   multiplier: number;
   link?: string;
 };
@@ -716,7 +1396,11 @@ function IncentivesGrid({ data }: { data: IncentivePoint[] }) {
                 {/* Top: image + multiplier */}
                 <View style={incentiveStyles.topRow}>
                   <Image
-                    source={{ uri: item.image }}
+                    source={
+                      typeof item.image === "number"
+                        ? item.image
+                        : { uri: item.image }
+                    }
                     style={incentiveStyles.incentiveImg}
                     contentFit="contain"
                   />
@@ -781,9 +1465,9 @@ const incentiveStyles = StyleSheet.create({
     justifyContent: "space-between",
   },
   incentiveImg: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
   },
   multiplierBlock: {
     alignItems: "flex-end",
@@ -902,13 +1586,7 @@ function AttributionChart({
       .toUpperCase()}`;
   };
 
-  if (loading) {
-    return (
-      <View style={attrStyles.center}>
-        <ActivityIndicator color="#7F56D9" />
-      </View>
-    );
-  }
+  if (loading) return <SkeletonChart />;
 
   if (points.length === 0) {
     return (
@@ -1091,6 +1769,283 @@ const attrStyles = StyleSheet.create({
   },
 });
 
+// ─── Health Info Chart ───────────────────────────────────────────────────────
+
+const HEALTH_SUBTABS = ["LTV", "Net Carry"] as const;
+type HealthSubTab = (typeof HEALTH_SUBTABS)[number];
+
+type HealthPoint = { date: string; value: number };
+
+// One carry-vault snapshot, projected onto the two Health Info metrics.
+type HealthSnapshot = {
+  date: string;
+  ltv: number;
+  netCarry: number;
+  assets: number;
+  liabilities: number;
+};
+
+// Raw shape of a `/vault/carry` snapshot from the API.
+type RawCarrySnapshot = {
+  timestamp: string;
+  ltv: number;
+  credit_in_usdc: number;
+  debt_in_usdc: number;
+  collateral_in_usdc: number;
+};
+
+function formatHealthValue(value: number, subTab: HealthSubTab): string {
+  return subTab === "LTV"
+    ? `${value.toFixed(2)}%`
+    : `${value.toFixed(2)} USDC`;
+}
+
+function HealthLineChart({
+  data,
+  width,
+  height,
+}: {
+  data: number[];
+  width: number;
+  height: number;
+}) {
+  if (data.length < 2) return null;
+
+  const padTop = 8;
+  const padBottom = 4;
+  const chartH = height - padTop - padBottom;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+
+  const getX = (i: number) => (i / (data.length - 1)) * width;
+  const getY = (v: number) =>
+    padTop + chartH - ((v - min) / range) * chartH;
+
+  const linePath = data
+    .map(
+      (v, i) =>
+        `${i === 0 ? "M" : "L"} ${getX(i).toFixed(2)} ${getY(v).toFixed(2)}`,
+    )
+    .join(" ");
+
+  const GRID_LINES = 5;
+
+  return (
+    <Svg width={width} height={height}>
+      {Array.from({ length: GRID_LINES }).map((_, i) => {
+        const y = padTop + (chartH / (GRID_LINES - 1)) * i;
+        return (
+          <Line
+            key={i}
+            x1={0}
+            y1={y}
+            x2={width}
+            y2={y}
+            stroke="#D8D2EC"
+            strokeWidth={1}
+            strokeDasharray="4 5"
+          />
+        );
+      })}
+      <Path
+        d={linePath}
+        stroke="#7F56D9"
+        strokeWidth={2}
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+function HealthInfoChart({
+  data,
+  loading,
+}: {
+  data: HealthSnapshot[];
+  loading: boolean;
+}) {
+  const [subTab, setSubTab] = useState<HealthSubTab>("LTV");
+  const [chartLayout, setChartLayout] = useState({ width: 0, height: 0 });
+
+  // Project each snapshot onto the metric for the active sub-tab.
+  const series = useMemo<HealthPoint[]>(
+    () =>
+      data.map((d) => ({
+        date: d.date,
+        value: subTab === "LTV" ? d.ltv : d.netCarry,
+      })),
+    [data, subTab],
+  );
+
+  if (loading) return <SkeletonLines count={6} />;
+
+  if (series.length < 2) {
+    return (
+      <View style={faqStyles.center}>
+        <Text style={faqStyles.emptyText}>No health data available</Text>
+      </View>
+    );
+  }
+
+  const latest = series[series.length - 1];
+  const displayValue = latest?.value ?? 0;
+  const displayDate =
+    new Date(latest.date)
+      .toLocaleString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        timeZone: "UTC",
+      })
+      .replace(",", "") + " UTC";
+
+  const labelIndices = [0, 0.2, 0.4, 0.6, 0.8, 1]
+    .map((f) =>
+      Math.min(Math.round(f * (series.length - 1)), series.length - 1),
+    )
+    .filter((v, i, arr) => arr.indexOf(v) === i);
+
+  const formatLabel = (ts: string) => {
+    const d = new Date(ts);
+    return `${d.getDate()} ${d
+      .toLocaleString("en-US", { month: "short" })
+      .toUpperCase()}`;
+  };
+
+  return (
+    <View style={healthStyles.container}>
+      {/* Header: value on the left, sub-tab switch on the right */}
+      <View style={healthStyles.headerRow}>
+        <View style={healthStyles.valueBlock}>
+          <Text style={healthStyles.valueText}>
+            {formatHealthValue(displayValue, subTab)}
+          </Text>
+          <Text style={healthStyles.dateText}>{displayDate}</Text>
+        </View>
+
+        <View style={healthStyles.subTabs}>
+          {HEALTH_SUBTABS.map((t) => {
+            const active = t === subTab;
+            return (
+              <TouchableOpacity
+                key={t}
+                activeOpacity={0.8}
+                onPress={() => setSubTab(t)}
+                style={[
+                  healthStyles.subTab,
+                  active && healthStyles.subTabActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    healthStyles.subTabText,
+                    active && healthStyles.subTabTextActive,
+                  ]}
+                >
+                  {t}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      {/* Chart */}
+      <View
+        style={healthStyles.chartArea}
+        onLayout={(e) =>
+          setChartLayout({
+            width: e.nativeEvent.layout.width,
+            height: e.nativeEvent.layout.height,
+          })
+        }
+      >
+        {chartLayout.width > 0 && chartLayout.height > 0 && (
+          <HealthLineChart
+            data={series.map((d) => d.value)}
+            width={chartLayout.width}
+            height={chartLayout.height}
+          />
+        )}
+      </View>
+
+      {/* Date labels */}
+      <View style={healthStyles.labelsRow}>
+        {labelIndices.map((idx) => (
+          <Text key={idx} style={healthStyles.dateLabel}>
+            {formatLabel(series[idx].date)}
+          </Text>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const healthStyles = StyleSheet.create({
+  container: { flex: 1 },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
+  subTabs: {
+    flexDirection: "row",
+    backgroundColor: "#E8E2F4",
+    borderRadius: 100,
+    padding: 2,
+    alignSelf: "flex-start",
+  },
+  subTab: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 100,
+  },
+  subTabActive: {
+    backgroundColor: "#FFFFFF",
+  },
+  subTabText: {
+    fontSize: 11,
+    fontFamily: "HankenGrotesk_500Medium",
+    color: "#9B97A6",
+  },
+  subTabTextActive: {
+    color: "#1A1A2E",
+    fontFamily: "HankenGrotesk_600SemiBold",
+  },
+  valueBlock: {},
+  valueText: {
+    fontSize: 14,
+    fontFamily: "HankenGrotesk_700Bold",
+    color: "#000000",
+  },
+  dateText: {
+    fontSize: 10,
+    fontFamily: "HankenGrotesk_400Regular",
+    color: "#626066",
+    marginTop: 1,
+  },
+  chartArea: {
+    flex: 1,
+  },
+  labelsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 8,
+  },
+  dateLabel: {
+    fontSize: 10,
+    fontFamily: "HankenGrotesk_400Regular",
+    color: "#9B97A6",
+  },
+});
+
 // ─── FAQ Tab ─────────────────────────────────────────────────────────────────
 
 type FaqItem = { question: string; answer: string };
@@ -1132,13 +2087,7 @@ function FaqAccordion({ item }: { item: FaqItem }) {
 }
 
 function FAQTab({ data, loading }: { data: FaqItem[]; loading: boolean }) {
-  if (loading) {
-    return (
-      <View style={faqStyles.center}>
-        <ActivityIndicator color="#7F56D9" />
-      </View>
-    );
-  }
+  if (loading) return <SkeletonLines count={5} />;
 
   if (data.length === 0) {
     return (
@@ -1273,13 +2222,7 @@ function DetailsTab({
     setTimeout(() => setCopiedAddr(null), 2000);
   };
 
-  if (loading) {
-    return (
-      <View style={detailStyles.center}>
-        <ActivityIndicator color="#7F56D9" />
-      </View>
-    );
-  }
+  if (loading) return <SkeletonLines count={6} />;
 
   if (!details) {
     return (
@@ -1493,7 +2436,10 @@ export default function YieldDetailScreen() {
   const activeWallet =
     wallets.find((w) => w.walletId === activeWalletId) ?? wallets[0] ?? null;
 
-  const vaultType = (type as VaultType) ?? "syUSD";
+  const requestedType = (type as VaultType) ?? "syUSD";
+  const vaultType: VaultType = VAULT_STATIC[requestedType]
+    ? requestedType
+    : "syUSD";
   const symbol = vaultType.toLowerCase();
   const config = VAULT_STATIC[vaultType];
 
@@ -1501,45 +2447,94 @@ export default function YieldDetailScreen() {
   const [ticker, setTicker] = useState(vaultType);
   const [tvl, setTvl] = useState("$0");
   const [apy, setApy] = useState("—");
-  const [balance, setBalance] = useState("$0");
+  const [balance, setBalance] = useState("--");
   const [tvlHistory, setTvlHistory] = useState<TvlPoint[]>([]);
+  const [tvlBaseCurrency, setTvlBaseCurrency] = useState("USD");
   const [tvlLoading, setTvlLoading] = useState(false);
   const [apyHistory, setApyHistory] = useState<ApyPoint[]>([]);
   const [apyLoading, setApyLoading] = useState(false);
+  const [apyMaWindow, setApyMaWindow] = useState<ApyMaWindow>("7d");
   const [allocHistory, setAllocHistory] = useState<AllocPoint[]>([]);
   const [allocLoading, setAllocLoading] = useState(false);
   const [attrHistory, setAttrHistory] = useState<AttrPoint[]>([]);
   const [attrLoading, setAttrLoading] = useState(false);
+  const [healthHistory, setHealthHistory] = useState<HealthSnapshot[]>([]);
+  const [healthLoading, setHealthLoading] = useState(false);
   const incentives = STATIC_INCENTIVES[vaultType];
   const [vaultDetails, setVaultDetails] = useState<VaultDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [faqs, setFaqs] = useState<FaqItem[]>([]);
-  const [activeTab, setActiveTab] = useState("TVL");
+  const detailTabs = tabsForVault(vaultType);
+  const [activeTab, setActiveTab] = useState(detailTabs[0]);
   const [depositModal, setDepositModal] = useState(false);
+  const [logoEgg, setLogoEgg] = useState(false);
+  // Drives the one-time logo wiggle hint until the egg is first opened.
+  const [eggDiscovered, setEggDiscovered] = useState(true);
+
+  useEffect(() => {
+    isSpinnerDiscovered().then((found) => setEggDiscovered(found));
+  }, []);
+
+  const openLogoEgg = () => {
+    setLogoEgg(true);
+    if (!eggDiscovered) {
+      setEggDiscovered(true);
+      markSpinnerDiscovered();
+    }
+  };
+
+  // Tab indicator animation
+  const [detailTabLayouts, setDetailTabLayouts] = useState<Record<string, { x: number; width: number }>>({});
+  const detailIndicatorX = useRef(new Animated.Value(0)).current;
+  const detailIndicatorW = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const layout = detailTabLayouts[activeTab];
+    if (!layout) return;
+    Animated.parallel([
+      Animated.spring(detailIndicatorX, { toValue: layout.x, damping: 20, stiffness: 200, useNativeDriver: false }),
+      Animated.spring(detailIndicatorW, { toValue: layout.width, damping: 20, stiffness: 200, useNativeDriver: false }),
+    ]).start();
+  }, [activeTab, detailTabLayouts]);
   const [navWidth, setNavWidth] = useState(0);
 
   useEffect(() => {
     fetchAll();
     fetchTVLHistory();
-    fetchAPYHistory();
     fetchAllocHistory();
     fetchAttrHistory();
+    fetchHealthHistory();
     fetchDetails();
   }, [vaultType, activeWallet?.walletId]);
+
+  // APY refetches on its own when the moving-average window changes.
+  useEffect(() => {
+    fetchAPYHistory(apyMaWindow);
+  }, [vaultType, apyMaWindow]);
 
   async function fetchTVLHistory() {
     setTvlLoading(true);
     try {
       const res = await fetch(
-        `https://api.lucidly.finance/services/vault/daily_tvl?strategyAddress=${config.address}`,
+        `${API_BASE}/vault/daily_tvl?strategyAddress=${config.address}`,
       );
       const json = await res.json();
       const arr = Array.isArray(json) ? json : (json?.result ?? []);
+      // `tvl` is in the vault's base currency (BTC/ETH for carry vaults);
+      // `tvl_usd` is always USD. Keep both so the chart can toggle.
+      setTvlBaseCurrency(arr[0]?.base_currency ?? "USD");
       setTvlHistory(
-        arr.map((item: { date: string; tvl: string | number }) => ({
-          date: item.date,
-          tvl: parseFloat(String(item.tvl)) || 0,
-        })),
+        arr.map(
+          (item: {
+            date: string;
+            tvl: string | number;
+            tvl_usd?: string | number;
+          }) => ({
+            date: item.date,
+            usd: parseFloat(String(item.tvl_usd ?? item.tvl)) || 0,
+            base: parseFloat(String(item.tvl)) || 0,
+          }),
+        ),
       );
     } catch {
       setTvlHistory([]);
@@ -1548,11 +2543,11 @@ export default function YieldDetailScreen() {
     }
   }
 
-  async function fetchAPYHistory() {
+  async function fetchAPYHistory(window: ApyMaWindow) {
     setApyLoading(true);
     try {
       const res = await fetch(
-        `https://api.lucidly.finance/services/vault/apy_history?vaultAddress=${config.address}&duration=7d&period=daily`,
+        `${API_BASE}/vault/apy_history?vaultAddress=${config.address}&duration=${window}&period=daily`,
       );
       const json = await res.json();
       const arr = json?.result ?? [];
@@ -1573,7 +2568,7 @@ export default function YieldDetailScreen() {
     setAllocLoading(true);
     try {
       const res = await fetch(
-        `https://api.lucidly.finance/services/vault/allocations_daily?vaultAddress=${config.address}`,
+        `${API_BASE}/vault/allocations_daily?vaultAddress=${config.address}`,
       );
       const json = await res.json();
       const arr = Array.isArray(json) ? json : (json?.result ?? []);
@@ -1598,11 +2593,41 @@ export default function YieldDetailScreen() {
     }
   }
 
+  // Carry-vault health metrics (LTV / Net Carry) over the last 45 days.
+  async function fetchHealthHistory() {
+    if (vaultType !== "cyBTC" && vaultType !== "cyETH") return;
+    setHealthLoading(true);
+    try {
+      const end = Math.floor(Date.now() / 1000);
+      const start = end - 45 * 24 * 60 * 60;
+      const res = await fetch(
+        `${API_BASE}/vault/carry?vaultAddress=${config.address}&start=${start}&end=${end}`,
+      );
+      const json = await res.json();
+      const arr: RawCarrySnapshot[] = Array.isArray(json)
+        ? json
+        : (json?.result ?? []);
+      setHealthHistory(
+        arr.map((item) => ({
+          date: item.timestamp,
+          ltv: (item.ltv ?? 0) * 100,
+          netCarry: (item.credit_in_usdc ?? 0) - (item.debt_in_usdc ?? 0),
+          assets: item.collateral_in_usdc ?? 0,
+          liabilities: item.debt_in_usdc ?? 0,
+        })),
+      );
+    } catch {
+      setHealthHistory([]);
+    } finally {
+      setHealthLoading(false);
+    }
+  }
+
   async function fetchAttrHistory() {
     setAttrLoading(true);
     try {
       const res = await fetch(
-        `https://api.lucidly.finance/services/vault/return_attribution?vaultAddress=${config.address}`,
+        `${API_BASE}/vault/return_attribution?vaultAddress=${config.address}`,
       );
       const json = await res.json();
       const arr = Array.isArray(json) ? json : (json?.result ?? []);
@@ -1635,14 +2660,16 @@ export default function YieldDetailScreen() {
     try {
       const [configRes, rateRes] = await Promise.all([
         fetch(
-          `https://api.lucidly.finance/services/vault_config?vaultSymbol=${symbol}`,
+          `${API_BASE}/vault_config?vaultSymbol=${symbol}`,
         ),
         fetch(
-          `https://api.lucidly.finance/services/exchange_rates?vaultAddress=${config.address}`,
+          `${API_BASE}/exchange_rates?vaultAddress=${config.address}`,
         ),
       ]);
-      const configJson = await configRes.json();
-      const rateJson = await rateRes.json();
+      // Parse each response defensively — a failing endpoint (e.g. a 500 on
+      // exchange_rates) must not blank the whole Details/FAQ tab.
+      const configJson = await configRes.json().catch(() => null);
+      const rateJson = await rateRes.json().catch(() => null);
 
       const vc =
         configJson?.result?.vault_constants ??
@@ -1650,15 +2677,25 @@ export default function YieldDetailScreen() {
         {};
       const rate: number = rateJson?.result ?? 1;
 
+      const detailsOverride = DETAILS_OVERRIDES[vaultType];
       setVaultDetails({
         address: vc.address ?? config.address,
-        auditedBy: vc.audited_by ? `${vc.audited_by} Audit Group` : "—",
-        deploymentDate: vc.deployment_date ?? "—",
-        managementFee: vc.management_fee ?? "0",
-        performanceFee: vc.performance_fee ?? "0",
-        rateProvider: vc.rate_provider ?? "—",
-        feeReceipt: vc.fee_payout ?? "—",
-        ownerAddress: vc.owner ?? "—",
+        auditedBy:
+          detailsOverride?.auditedBy ??
+          (vc.audited_by ? `${vc.audited_by} Audit Group` : "—"),
+        deploymentDate:
+          detailsOverride?.deploymentDate ?? vc.deployment_date ?? "—",
+        managementFee:
+          FEE_OVERRIDES[vaultType]?.managementFee ??
+          vc.management_fee ??
+          "0",
+        performanceFee:
+          FEE_OVERRIDES[vaultType]?.performanceFee ??
+          vc.performance_fee ??
+          "0",
+        rateProvider: detailsOverride?.rateProvider ?? vc.rate_provider ?? "—",
+        feeReceipt: detailsOverride?.feeReceipt ?? vc.fee_payout ?? "—",
+        ownerAddress: detailsOverride?.ownerAddress ?? vc.owner ?? "—",
         sharePrice: rate.toFixed(4),
         baseAsset: vc.base_asset?.asset ?? "USDC",
         symbol: vc.symbol ?? vaultType,
@@ -1666,10 +2703,15 @@ export default function YieldDetailScreen() {
 
       const rawFaqs: { question: string; answer: string }[] =
         vc.faqs ?? configJson?.result?.faqs ?? [];
-      setFaqs(rawFaqs.map((f) => ({ question: f.question, answer: f.answer })));
+      const faqOverride = FAQ_OVERRIDES[vaultType];
+      setFaqs(
+        faqOverride ??
+          rawFaqs.map((f) => ({ question: f.question, answer: f.answer })),
+      );
     } catch {
       setVaultDetails(null);
-      setFaqs([]);
+      // Static FAQ overrides should still render even if the fetch fails.
+      setFaqs(FAQ_OVERRIDES[vaultType] ?? []);
     } finally {
       setDetailsLoading(false);
     }
@@ -1679,7 +2721,7 @@ export default function YieldDetailScreen() {
     // API 1: Vault Config
     try {
       const res = await fetch(
-        `https://api.lucidly.finance/services/vault_config?vaultSymbol=${symbol}`,
+        `${API_BASE}/vault_config?vaultSymbol=${symbol}`,
       );
       const json = await res.json();
       const cfg = json?.result ?? json;
@@ -1697,13 +2739,13 @@ export default function YieldDetailScreen() {
         `${d.getDate()} ${d.toLocaleString("en-US", { month: "long" })},${d.getFullYear()}`,
       );
       const res = await fetch(
-        `https://api.lucidly.finance/services/vault/daily_tvl?strategyAddress=${config.address}&start=${dateParam}&end=${dateParam}`,
+        `${API_BASE}/vault/daily_tvl?strategyAddress=${config.address}&start=${dateParam}&end=${dateParam}`,
       );
       const json = await res.json();
       const arr = Array.isArray(json) ? json : json?.result;
       const latest =
         Array.isArray(arr) && arr.length > 0 ? arr[arr.length - 1] : null;
-      setTvl(formatTVL(parseFloat(latest?.tvl) || 0));
+      setTvl(formatTVL(parseFloat(latest?.tvl_usd ?? latest?.tvl) || 0));
     } catch {
       setTvl("$0");
     }
@@ -1711,7 +2753,7 @@ export default function YieldDetailScreen() {
     // API 3: APY 7d
     try {
       const res = await fetch(
-        `https://api.lucidly.finance/services/vault/7d-ma?vaultAddress=${config.address}`,
+        `${API_BASE}/vault/apy?vaultAddress=${config.address}&duration=30d`,
       );
       const json = await res.json();
       const raw = json?.result?.trailing_total_APY;
@@ -1721,19 +2763,17 @@ export default function YieldDetailScreen() {
     // API 4: Portfolio balance for this vault
     if (activeWallet) {
       try {
-        const deviceId =
-          (await AsyncStorage.getItem("lucidly_device_id")) ?? "lucidly-ios";
         const res = await fetch(
-          `https://api.lucidly.finance/services/mobile/user/wallet/portfolio?device_id=${deviceId}&wallet_address=${activeWallet.walletId}`,
+          `${API_BASE}/mobile/user/wallet/portfolio?device_id=${DEVICE_ID}&wallet_address=${activeWallet.walletId}`,
         );
         const json = await res.json();
         const entry = (json?.portfolio ?? []).find(
           (p: { ticker: string; balance: number }) => p.ticker === vaultType,
         );
         const bal = entry?.balance ?? 0;
-        setBalance(formatTVL(bal));
+        setBalance(bal > 0 ? formatTVL(bal) : "--");
       } catch {
-        setBalance("$0");
+        setBalance("--");
       }
     }
   }
@@ -1760,19 +2800,27 @@ export default function YieldDetailScreen() {
           </Svg>
         </TouchableOpacity>
         <Image
-          source={require("../assets/flagshipTag.svg")}
-          style={styles.flagshipTag}
+          source={VAULT_TAG[vaultType].source}
+          style={{
+            width: VAULT_TAG[vaultType].width,
+            height: VAULT_TAG[vaultType].height,
+          }}
           contentFit="contain"
         />
       </View>
 
       {/* ── Hero Row ────────────────────────────────────────────────────── */}
       <View style={styles.hero}>
-        <Image
-          source={config.icon}
-          style={styles.vaultIcon}
-          contentFit="contain"
-        />
+        {/* Logo tap → spinning-logo easter egg (wiggles until discovered) */}
+        <TouchableOpacity activeOpacity={0.7} onPress={openLogoEgg}>
+          <WiggleHint active={!eggDiscovered}>
+            <Image
+              source={config.icon}
+              style={styles.vaultIcon}
+              contentFit="contain"
+            />
+          </WiggleHint>
+        </TouchableOpacity>
         <View style={styles.heroText}>
           <Text style={styles.vaultName}>{vaultName}</Text>
           <Text style={styles.vaultTicker}>{ticker}</Text>
@@ -1825,28 +2873,40 @@ export default function YieldDetailScreen() {
       </View>
 
       {/* ── Segmented Control ───────────────────────────────────────────── */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.tabsScroll}
-        contentContainerStyle={styles.tabsContainer}
-      >
-        {DETAIL_TABS.map((tab) => {
-          const active = activeTab === tab;
-          return (
-            <TouchableOpacity
-              key={tab}
-              style={[styles.tabItem, active && styles.tabItemActive]}
-              onPress={() => setActiveTab(tab)}
-              activeOpacity={1}
-            >
-              <Text style={[styles.tabText, active && styles.tabTextActive]}>
-                {tab}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </ScrollView>
+      <View style={{ position: "relative", marginBottom: 4 }}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.tabsScroll}
+          contentContainerStyle={styles.tabsContainer}
+        >
+          <Animated.View
+            style={[
+              styles.tabIndicator,
+              { left: detailIndicatorX, width: detailIndicatorW },
+            ]}
+          />
+          {detailTabs.map((tab) => {
+            const active = activeTab === tab;
+            return (
+              <TouchableOpacity
+                key={tab}
+                style={styles.tabItem}
+                onPress={() => setActiveTab(tab)}
+                activeOpacity={1}
+                onLayout={(e) => {
+                  const { x, width } = e.nativeEvent.layout;
+                  setDetailTabLayouts((prev) => ({ ...prev, [tab]: { x, width } }));
+                }}
+              >
+                <Text style={[styles.tabText, active && styles.tabTextActive]}>
+                  {tab}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
 
       {/* ── Tab Content ─────────────────────────────────────────────────── */}
       {SCROLLABLE_TABS.includes(activeTab) ? (
@@ -1858,7 +2918,7 @@ export default function YieldDetailScreen() {
           ]}
           showsVerticalScrollIndicator={false}
         >
-          {activeTab === "Invcentives" ? (
+          {activeTab === "Incentives" ? (
             <IncentivesGrid data={incentives} />
           ) : activeTab === "Details" ? (
             <DetailsTab details={vaultDetails} loading={detailsLoading} />
@@ -1875,13 +2935,33 @@ export default function YieldDetailScreen() {
           style={[styles.tabContent, { paddingBottom: insets.bottom + 94 }]}
         >
           {activeTab === "TVL" ? (
-            <TVLChart data={tvlHistory} loading={tvlLoading} />
+            <TVLChart
+              data={tvlHistory}
+              loading={tvlLoading}
+              baseCurrency={tvlBaseCurrency}
+            />
           ) : activeTab === "APY" ? (
-            <APYChart data={apyHistory} loading={apyLoading} />
+            <APYChart
+              data={apyHistory}
+              loading={apyLoading}
+              maWindow={apyMaWindow}
+              onMaWindowChange={setApyMaWindow}
+            />
           ) : activeTab === "Allocations" ? (
-            <AllocationsChart data={allocHistory} loading={allocLoading} />
+            vaultType === "cyBTC" || vaultType === "cyETH" ? (
+              <CarryAllocationsTab
+                allocData={allocHistory}
+                allocLoading={allocLoading}
+                carryData={healthHistory}
+                carryLoading={healthLoading}
+              />
+            ) : (
+              <AllocationsChart data={allocHistory} loading={allocLoading} />
+            )
           ) : activeTab === "Attribution" ? (
             <AttributionChart data={attrHistory} loading={attrLoading} />
+          ) : activeTab === "Health Info" ? (
+            <HealthInfoChart data={healthHistory} loading={healthLoading} />
           ) : (
             <View style={styles.tabPlaceholder}>
               <Text style={styles.tabPlaceholderText}>{activeTab}</Text>
@@ -1982,6 +3062,13 @@ export default function YieldDetailScreen() {
           </View>
         </View>
       </Modal>
+
+      <SpinningLogoEgg
+        visible={logoEgg}
+        icon={config.icon as number}
+        accent={VAULT_ACCENT[vaultType]}
+        onClose={() => setLogoEgg(false)}
+      />
     </View>
   );
 }
@@ -2000,11 +3087,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: 16,
-  },
-  flagshipTag: {
-    height: 28,
-    width: 110,
+    paddingBottom: 20,
   },
   // Hero
   hero: {
@@ -2107,16 +3190,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 8,
   },
+  tabIndicator: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    backgroundColor: "#E2D9F9",
+    borderRadius: 100,
+    borderWidth: 1,
+    borderColor: "#CBBAF1",
+  },
   tabItem: {
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 100,
     borderWidth: 1,
     borderColor: "#D6CFF0",
-  },
-  tabItemActive: {
-    backgroundColor: "#E2D9F9",
-    borderColor: "#CBBAF1",
   },
   tabText: {
     fontSize: 12,

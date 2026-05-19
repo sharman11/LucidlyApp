@@ -7,19 +7,19 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  Alert,
   Modal,
   Dimensions,
   TouchableWithoutFeedback,
 } from "react-native";
+import * as Clipboard from "expo-clipboard";
 import Svg, { Path, G, ClipPath, Rect, Defs } from "react-native-svg";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/context/auth";
+import { API_BASE, DEVICE_ID } from "@/constants/api";
 
 const { height: SCREEN_HEIGHT } = Dimensions.get("window");
 const WALLET_REGEX = /^0x[0-9a-fA-F]{40}$/;
-const DEVICE_ID = `lucidly-${Platform.OS}`;
 
 // ─── Icons ───────────────────────────────────────────────────────────────────
 
@@ -107,6 +107,55 @@ function StarIcon() {
   );
 }
 
+function ClearIcon() {
+  return (
+    <Svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <Path
+        d="M8 1.33334C4.31999 1.33334 1.33334 4.31999 1.33334 8C1.33334 11.68 4.31999 14.6667 8 14.6667C11.68 14.6667 14.6667 11.68 14.6667 8C14.6667 4.31999 11.68 1.33334 8 1.33334Z"
+        fill="#D6CFF0"
+      />
+      <Path
+        d="M10 6L6 10M6 6L10 10"
+        stroke="#7A7880"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <Svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <Path
+        d="M8 1.33334C4.31999 1.33334 1.33334 4.31999 1.33334 8C1.33334 11.68 4.31999 14.6667 8 14.6667C11.68 14.6667 14.6667 11.68 14.6667 8C14.6667 4.31999 11.68 1.33334 8 1.33334Z"
+        fill="#D1FAE5"
+      />
+      <Path
+        d="M5.33334 8L7.33334 10L10.6667 6"
+        stroke="#22C55E"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+function PasteIcon() {
+  return (
+    <Svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <Path
+        d="M8 1.5H9C9.55228 1.5 10 1.94772 10 2.5V10C10 10.5523 9.55228 11 9 11H3C2.44772 11 2 10.5523 2 10V2.5C2 1.94772 2.44772 1.5 3 1.5H4M4.5 1H7.5C7.77614 1 8 1.22386 8 1.5V2C8 2.27614 7.77614 2.5 7.5 2.5H4.5C4.22386 2.5 4 2.27614 4 2V1.5C4 1.22386 4.22386 1 4.5 1Z"
+        stroke="#7F56D9"
+        strokeWidth="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
 // ─── Help Bottom Sheet ────────────────────────────────────────────────────────
 
 function HelpModal({
@@ -156,9 +205,9 @@ const sheet = StyleSheet.create({
     backgroundColor: "#FFFFFF",
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    padding: 24,
+    paddingTop: 12,
+    paddingHorizontal: 24,
     paddingBottom: 40,
-    gap: 14,
   },
   handle: {
     width: 36,
@@ -166,25 +215,26 @@ const sheet = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: "#D6CFF0",
     alignSelf: "center",
-    marginBottom: 4,
+    marginBottom: 20,
   },
   title: {
     fontSize: 18,
     fontFamily: "HankenGrotesk_700Bold",
     color: "#000000",
+    marginBottom: 8,
   },
   body: {
     fontSize: 13,
     fontFamily: "HankenGrotesk_400Regular",
     color: "#626066",
     lineHeight: 20,
+    marginBottom: 16,
   },
   closeBtn: {
     backgroundColor: "#7F56D9",
     borderRadius: 100,
-    paddingVertical: 14,
+    paddingVertical: 16,
     alignItems: "center",
-    marginTop: 4,
   },
   closeBtnText: {
     fontSize: 15,
@@ -204,25 +254,70 @@ export default function LoginScreen() {
   const [focusedField, setFocusedField] = useState<
     "walletId" | "walletName" | null
   >(null);
+
+  // Inline error state (replaces Alerts)
+  const [addressError, setAddressError] = useState<string | null>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [bannerError, setBannerError] = useState<string | null>(null);
+
+  // Track whether user has interacted with fields (for live validation)
+  const [addressTouched, setAddressTouched] = useState(false);
+  const [nameTouched, setNameTouched] = useState(false);
+
   const insets = useSafeAreaInsets();
 
-  const handleConnect = async () => {
-    const trimmedId = walletId.trim();
-    const trimmedName = walletName.trim();
+  // Derived validation
+  const trimmedId = walletId.trim();
+  const trimmedName = walletName.trim();
+  const isAddressValid = WALLET_REGEX.test(trimmedId);
+  const isAddressPartial = trimmedId.length > 0 && !isAddressValid;
+  const isNameValid = trimmedName.length > 0;
+  const isFormValid = isAddressValid && isNameValid;
 
-    if (!WALLET_REGEX.test(trimmedId)) {
-      Alert.alert(
-        "Invalid Address",
+  // Live validation errors (only after field has been touched/blurred)
+  const liveAddressError =
+    addressTouched && isAddressPartial
+      ? "Enter a valid Ethereum address (0x + 40 hex characters)"
+      : null;
+  const liveNameError =
+    nameTouched && !isNameValid ? "Give this wallet a nickname" : null;
+
+  const clearErrors = () => {
+    setAddressError(null);
+    setNameError(null);
+    setBannerError(null);
+  };
+
+  const showSuccess = (address: string, name: string) => {
+    router.push({
+      pathname: "/wallet-success",
+      params: { address, name },
+    });
+  };
+
+  const handlePaste = async () => {
+    const text = await Clipboard.getStringAsync();
+    if (text) {
+      setWalletId(text.trim());
+      setAddressTouched(true);
+      clearErrors();
+    }
+  };
+
+  const handleConnect = async () => {
+    clearErrors();
+
+    if (!isAddressValid) {
+      setAddressError(
         "That doesn't look like a valid Ethereum address. Make sure it starts with 0x and is 42 characters long.",
       );
+      setAddressTouched(true);
       return;
     }
 
-    if (!trimmedName) {
-      Alert.alert(
-        "Name Required",
-        "Please give this wallet a nickname before continuing.",
-      );
+    if (!isNameValid) {
+      setNameError("Please give this wallet a nickname before continuing.");
+      setNameTouched(true);
       return;
     }
 
@@ -231,14 +326,7 @@ export default function LoginScreen() {
       (w) => w.walletId.toLowerCase() === trimmedId.toLowerCase(),
     );
     if (alreadyAdded) {
-      Alert.alert(
-        "Wallet Already Added",
-        "This wallet address is already linked to your account.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "View Portfolio", onPress: () => router.replace("/(tabs)/portfolio") },
-        ],
-      );
+      setBannerError("This wallet address is already linked to your account.");
       return;
     }
 
@@ -246,7 +334,7 @@ export default function LoginScreen() {
     try {
       // Step 1: Check if wallet exists on this device via GET
       const getRes = await fetch(
-        `https://api.lucidly.finance/services/mobile/user/wallets/${DEVICE_ID}`,
+        `${API_BASE}/mobile/user/wallets/${DEVICE_ID}`,
       );
       if (getRes.ok) {
         const getJson = await getRes.json();
@@ -256,16 +344,15 @@ export default function LoginScreen() {
           (w) => w.wallet_address.toLowerCase() === trimmedId.toLowerCase(),
         );
         if (match) {
-          // Wallet is on the server but not locally — add with user's chosen name
           addWallet(match.wallet_address, trimmedName);
-          router.replace("/wallet-success");
+          showSuccess(match.wallet_address, trimmedName);
           return;
         }
       }
 
       // Step 2: Not found on server — try to connect
       const res = await fetch(
-        "https://api.lucidly.finance/services/mobile/user/wallet/connect",
+        `${API_BASE}/mobile/user/wallet/connect`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -279,30 +366,44 @@ export default function LoginScreen() {
 
       if (res.ok) {
         addWallet(trimmedId, trimmedName);
-        router.replace("/wallet-success");
+        showSuccess(trimmedId, trimmedName);
         return;
       }
 
       if (res.status === 409) {
-        // Server already has it — add locally and continue normally
         addWallet(trimmedId, trimmedName);
-        router.replace("/wallet-success");
+        showSuccess(trimmedId, trimmedName);
         return;
       }
 
-      Alert.alert(
-        "Wallet Not Recognised",
-        "This wallet address doesn't appear to be associated with a Lucidly account. Please check the address and try again.",
+      setBannerError(
+        "This wallet doesn't appear to be associated with a Lucidly account. Please check the address.",
       );
     } catch {
-      Alert.alert(
-        "Something Went Wrong",
+      setBannerError(
         "We couldn't reach the server. Please check your connection and try again.",
       );
     } finally {
       setLoading(false);
     }
   };
+
+  // Determine address field border color
+  const addressBorderColor =
+    addressError || liveAddressError
+      ? "#EF4444"
+      : focusedField === "walletId"
+        ? "#7F56D9"
+        : isAddressValid && addressTouched
+          ? "#22C55E"
+          : "#E2D9F9";
+
+  const nameBorderColor =
+    nameError || liveNameError
+      ? "#EF4444"
+      : focusedField === "walletName"
+        ? "#7F56D9"
+        : "#E2D9F9";
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -336,58 +437,143 @@ export default function LoginScreen() {
             wallet address.
           </Text>
 
+          {/* Banner error (network / duplicate / not recognised) */}
+          {bannerError != null && (
+            <TouchableOpacity
+              style={styles.errorBanner}
+              onPress={() => setBannerError(null)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.errorBannerText}>{bannerError}</Text>
+              <Svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <Path
+                  d="M10.5 3.5L3.5 10.5M3.5 3.5L10.5 10.5"
+                  stroke="#EF4444"
+                  strokeWidth="1.2"
+                  strokeLinecap="round"
+                />
+              </Svg>
+            </TouchableOpacity>
+          )}
+
           {/* Wallet Address Input */}
           <View style={styles.fieldGroup}>
-            <TextInput
-              style={[
-                styles.input,
-                focusedField === "walletId" && styles.inputActive,
-              ]}
-              placeholder="0x... add your address"
-              placeholderTextColor="#7A7880"
-              value={walletId}
-              onChangeText={setWalletId}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="default"
-              onFocus={() => setFocusedField("walletId")}
-              onBlur={() => setFocusedField(null)}
-            />
-            <View style={styles.hint}>
-              <ShieldIcon />
-              <Text style={styles.hintText}>
-                This is your public address — never share your private key.
-              </Text>
+            <View
+              style={[styles.inputRow, { borderColor: addressBorderColor }]}
+            >
+              <TextInput
+                style={styles.inputText}
+                placeholder="0x... add your address"
+                placeholderTextColor="#7A7880"
+                value={walletId}
+                onChangeText={(t) => {
+                  setWalletId(t);
+                  setAddressError(null);
+                  setBannerError(null);
+                }}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="default"
+                editable={!loading}
+                onFocus={() => setFocusedField("walletId")}
+                onBlur={() => {
+                  setFocusedField(null);
+                  setAddressTouched(true);
+                }}
+              />
+              {/* Right side actions */}
+              {walletId.length > 0 ? (
+                <View style={styles.inputActions}>
+                  {isAddressValid && <CheckIcon />}
+                  <TouchableOpacity
+                    onPress={() => {
+                      setWalletId("");
+                      setAddressError(null);
+                      setAddressTouched(false);
+                    }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <ClearIcon />
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.pastePill}
+                  onPress={handlePaste}
+                  activeOpacity={0.7}
+                >
+                  <PasteIcon />
+                  <Text style={styles.pastePillText}>Paste</Text>
+                </TouchableOpacity>
+              )}
             </View>
+            {/* Inline error or hint */}
+            {addressError != null || liveAddressError != null ? (
+              <Text style={styles.fieldError}>
+                {addressError ?? liveAddressError}
+              </Text>
+            ) : (
+              <View style={styles.hint}>
+                <ShieldIcon />
+                <Text style={styles.hintText}>
+                  This is your public address — never share your private key.
+                </Text>
+              </View>
+            )}
           </View>
 
           {/* Wallet Name Input */}
           <View style={styles.fieldGroup}>
-            <TextInput
-              style={[
-                styles.input,
-                focusedField === "walletName" && styles.inputActive,
-              ]}
-              placeholder="Wallet nickname"
-              placeholderTextColor="#7A7880"
-              value={walletName}
-              onChangeText={setWalletName}
-              autoCorrect={false}
-              onFocus={() => setFocusedField("walletName")}
-              onBlur={() => setFocusedField(null)}
-            />
-            <View style={styles.hint}>
-              <StarIcon />
-              <Text style={styles.hintText}>
-                Helps you identify this wallet later.
-              </Text>
+            <View style={[styles.inputRow, { borderColor: nameBorderColor }]}>
+              <TextInput
+                style={styles.inputText}
+                placeholder="Wallet nickname"
+                placeholderTextColor="#7A7880"
+                value={walletName}
+                onChangeText={(t) => {
+                  setWalletName(t);
+                  setNameError(null);
+                  setBannerError(null);
+                }}
+                autoCorrect={false}
+                editable={!loading}
+                onFocus={() => setFocusedField("walletName")}
+                onBlur={() => {
+                  setFocusedField(null);
+                  setNameTouched(true);
+                }}
+              />
+              {walletName.length > 0 && (
+                <TouchableOpacity
+                  onPress={() => {
+                    setWalletName("");
+                    setNameError(null);
+                    setNameTouched(false);
+                  }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <ClearIcon />
+                </TouchableOpacity>
+              )}
             </View>
+            {nameError != null || liveNameError != null ? (
+              <Text style={styles.fieldError}>
+                {nameError ?? liveNameError}
+              </Text>
+            ) : (
+              <View style={styles.hint}>
+                <StarIcon />
+                <Text style={styles.hintText}>
+                  Helps you identify this wallet later.
+                </Text>
+              </View>
+            )}
           </View>
         </View>
 
         <View style={styles.flex} />
 
-        {/* Connect Button */}
+        {/* Add Wallet Button */}
         <View style={[styles.footer, { paddingBottom: SCREEN_HEIGHT * 0.06 }]}>
           <View style={styles.buttonOuter}>
             <View
@@ -397,13 +583,22 @@ export default function LoginScreen() {
               style={[StyleSheet.absoluteFillObject, styles.buttonShadowLight]}
             />
             <TouchableOpacity
-              style={[styles.button, loading && styles.buttonDisabled]}
+              style={[
+                styles.button,
+                loading && styles.buttonDisabled,
+                isFormValid && !loading && styles.buttonReady,
+              ]}
               onPress={handleConnect}
               disabled={loading}
               activeOpacity={0.8}
             >
-              <Text style={styles.buttonLabel}>
-                {loading ? "Connecting..." : "Connect Wallet"}
+              <Text
+                style={[
+                  styles.buttonLabel,
+                  isFormValid && !loading && styles.buttonLabelReady,
+                ]}
+              >
+                {loading ? "Adding..." : "Add Wallet"}
               </Text>
             </TouchableOpacity>
           </View>
@@ -458,6 +653,48 @@ const styles = StyleSheet.create({
   fieldGroup: {
     marginBottom: 20,
   },
+
+  // Input row — wraps TextInput + actions in a single bordered container
+  inputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    minHeight: 54,
+    backgroundColor: "#F4F0FF",
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 16,
+    gap: 8,
+  },
+  inputText: {
+    flex: 1,
+    fontSize: 15,
+    fontFamily: "HankenGrotesk_400Regular",
+    color: "#000000",
+    paddingVertical: 16,
+  },
+  inputActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+
+  // Paste pill
+  pastePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#E2D9F9",
+    borderRadius: 100,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  pastePillText: {
+    fontSize: 11,
+    fontFamily: "HankenGrotesk_600SemiBold",
+    color: "#7F56D9",
+  },
+
+  // Hints & errors
   hint: {
     flexDirection: "row",
     alignItems: "center",
@@ -472,25 +709,37 @@ const styles = StyleSheet.create({
     flex: 1,
     lineHeight: 17,
   },
+  fieldError: {
+    fontSize: 11,
+    fontFamily: "HankenGrotesk_500Medium",
+    color: "#EF4444",
+    marginTop: 6,
+    paddingHorizontal: 4,
+    lineHeight: 16,
+  },
 
-  input: {
-    fontSize: 15,
-    fontFamily: "HankenGrotesk_400Regular",
-    color: "#000000",
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-    minHeight: 54,
-    backgroundColor: "#F4F0FF",
+  // Banner error
+  errorBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#FEF2F2",
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#E2D9F9",
+    borderColor: "#FECACA",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 20,
+    gap: 10,
   },
-  inputActive: {
-    borderColor: "#7F56D9",
+  errorBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "HankenGrotesk_500Medium",
+    color: "#B91C1C",
+    lineHeight: 18,
   },
 
-  // Button shadow layers
-  // box-shadow: 4px 4px 5px rgba(0,0,0,0.05), -4px -4px 5px #FFFFFF
+  // Button
   footer: {
     paddingHorizontal: 20,
   },
@@ -532,10 +781,16 @@ const styles = StyleSheet.create({
   buttonDisabled: {
     opacity: 0.65,
   },
+  buttonReady: {
+    backgroundColor: "#7F56D9",
+  },
   buttonLabel: {
     fontSize: 16,
     fontFamily: "HankenGrotesk_600SemiBold",
     color: "#7F56D9",
     letterSpacing: 0.2,
+  },
+  buttonLabelReady: {
+    color: "#FFFFFF",
   },
 });

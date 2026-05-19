@@ -1,11 +1,12 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/context/auth";
-import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, Animated } from "react-native";
 import { Image } from "expo-image";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import Svg, { Path } from "react-native-svg";
+import * as Haptics from "expo-haptics";
 
 const ACTIVE = "#7F56D9";
 const INACTIVE = "#353140";
@@ -82,6 +83,25 @@ export function CustomTabBar({ state, navigation }: BottomTabBarProps) {
   const extraLeft = state.index === 0 ? 20 : 0;
   const extraRight = state.index === state.routes.length - 1 ? 20 : 0;
 
+  // Animated selector position
+  const selectorX = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (containerWidth === 0) return;
+    const targetLeft =
+      state.index * tabWidth +
+      4 +
+      (state.index === 0 ? 20 : 0) / 2 -
+      (state.index === state.routes.length - 1 ? 20 : 0) / 2;
+
+    Animated.spring(selectorX, {
+      toValue: targetLeft,
+      damping: 20,
+      stiffness: 200,
+      useNativeDriver: false,
+    }).start();
+  }, [state.index, containerWidth, tabWidth]);
+
   return (
     <View style={[styles.wrapper, { paddingBottom: insets.bottom + 8 }]}>
       <View
@@ -98,23 +118,29 @@ export function CustomTabBar({ state, navigation }: BottomTabBarProps) {
           contentPosition="center"
         />
         {containerWidth > 0 && (
-          <Image
-            source={require("../../assets/navSelector.png")}
+          <Animated.View
             style={[
               styles.selector,
               {
-                left: state.index * tabWidth + 4 + extraLeft / 2 - extraRight / 2,
+                left: selectorX,
                 width: tabWidth - 8,
               },
             ]}
-            contentFit="fill"
-          />
+          >
+            <Image
+              source={require("../../assets/navSelector.png")}
+              style={{ width: "100%", height: "100%" }}
+              contentFit="fill"
+            />
+          </Animated.View>
         )}
         {state.routes.map((route, index) => {
           const isFocused = state.index === index;
           const color = isFocused ? ACTIVE : INACTIVE;
 
           const onPress = () => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
             if (route.name === "wallet") {
               if (wallets.length === 0) {
                 router.navigate("/login");

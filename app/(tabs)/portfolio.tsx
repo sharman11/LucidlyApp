@@ -1,19 +1,24 @@
-import { useState, useEffect, useRef } from "react";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
   ScrollView,
   StyleSheet,
-  ActivityIndicator,
   Linking,
+  Animated,
+  Easing,
+  RefreshControl,
 } from "react-native";
 import { Image } from "expo-image";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Path } from "react-native-svg";
 import { useAuth } from "@/context/auth";
+import { API_BASE, DEVICE_ID, AUTO_RESET_MS, BAR_GAP } from "@/constants/api";
+import { fetchJSON } from "@/lib/fetch";
+import { ErrorRetry } from "@/components/ui/error-retry";
+import { Skeleton } from "@/components/ui/skeleton";
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -42,7 +47,18 @@ function SupportIcon() {
 
 // ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-const TABS = [
+type TabConfig = {
+  key: string;
+  label: string;
+  icon: number;
+  tint: boolean;
+  barColor: string;
+  activeBg?: string;
+  activeBorder?: string;
+  textColor?: string;
+};
+
+const TABS: TabConfig[] = [
   {
     key: "all",
     label: "All Deposits",
@@ -61,28 +77,38 @@ const TABS = [
     barColor: "#2775CA",
   },
   {
-    key: "syETH",
-    label: "syETH",
-    icon: require("../../assets/syethIcon.svg"),
+    key: "cyBTC",
+    label: "cyBTC",
+    icon: require("../../assets/cyBTCIcon.svg"),
     tint: false,
-    activeBg: "#E5E5FD",
-    activeBorder: "#D6D6F9",
+    activeBg: "#CFE7F6",
+    activeBorder: "#9BCDEC",
+    textColor: "#0078CF",
+    barColor: "#0078CF",
+  },
+  {
+    key: "cyETH",
+    label: "cyETH",
+    icon: require("../../assets/cyETHIcon.svg"),
+    tint: false,
+    activeBg: "#E0E5FC",
+    activeBorder: "#B6C2F4",
     textColor: "#627EEA",
     barColor: "#627EEA",
   },
   {
-    key: "syBTC",
-    label: "syBTC",
-    icon: require("../../assets/sybtcIcon.svg"),
+    key: "jrRoyUSDC",
+    label: "jrRoyUSDC",
+    icon: require("../../assets/jrRoyIcon.svg"),
     tint: false,
-    activeBg: "#F5E7E7",
-    activeBorder: "#E2C9D3",
-    textColor: "#F7931A",
-    barColor: "#F7931A",
+    activeBg: "#D4ECE5",
+    activeBorder: "#9FD2C2",
+    textColor: "#248670",
+    barColor: "#248670",
   },
-] as const;
+];
 
-type TabKey = (typeof TABS)[number]["key"];
+type TabKey = string;
 
 // ─── Bar Chart ────────────────────────────────────────────────────────────────
 
@@ -95,41 +121,127 @@ const TIME_RANGES: {
   days: number;
   maxBars: number;
 }[] = [
-  { key: "45d", label: "45D", days: 45, maxBars: 45 }, // fewest bars → thickest
-  { key: "3m", label: "3M", days: 90, maxBars: 65 }, // more bars   → medium
-  { key: "6m", label: "6M", days: 180, maxBars: 90 }, // most bars   → thinnest
+  { key: "45d", label: "45D", days: 45, maxBars: 45 },
+  { key: "3m", label: "3M", days: 90, maxBars: 65 },
+  { key: "6m", label: "6M", days: 180, maxBars: 90 },
 ];
 
-const BAR_GAP = 2;
-const AUTO_RESET_MS = 8000;
 
-// Down-sample to at most maxBars by picking evenly-spaced entries
 function sample(arr: HistoryPoint[], maxBars: number): HistoryPoint[] {
   if (arr.length <= maxBars) return arr;
   const step = arr.length / maxBars;
   return Array.from({ length: maxBars }, (_, i) => arr[Math.round(i * step)]);
 }
 
+const BAR_HEIGHTS = [
+  0.4, 0.6, 0.5, 0.8, 0.7, 0.3, 0.9, 0.5, 0.6, 0.4,
+  0.7, 0.8, 0.5, 0.6, 0.4, 0.7, 0.3, 0.8, 0.6, 0.5,
+];
+
+function SkeletonBars() {
+  // Single shared shimmer driver, native-driven for opacity.
+  const shimmer = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    shimmer.setValue(0);
+    const loop = Animated.loop(
+      Animated.timing(shimmer, {
+        toValue: 1,
+        duration: 1400,
+        easing: Easing.inOut(Easing.ease),
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [shimmer]);
+
+  return (
+    <View style={chartStyles.outer}>
+      <View style={{ flexDirection: "row", gap: 6, marginBottom: 10 }}>
+        <Skeleton width={80} height={22} borderRadius={100} />
+        <View style={{ flex: 1 }} />
+        <Skeleton width={36} height={22} borderRadius={100} />
+        <Skeleton width={36} height={22} borderRadius={100} />
+        <Skeleton width={36} height={22} borderRadius={100} />
+      </View>
+      <View style={chartStyles.barsRow}>
+        {BAR_HEIGHTS.map((baseH, i) => {
+          // Stagger each bar's pulse peak so the bars shimmer in a wave.
+          // Range [0.05, 0.5] keeps the interpolate input strictly increasing.
+          const peak = 0.05 + (i % 8) / 16;
+          const opacity = shimmer.interpolate({
+            inputRange: [0, peak, peak + 0.45, 1],
+            outputRange: [0.35, 0.7, 0.35, 0.35],
+            extrapolate: "clamp",
+          });
+          return (
+            <View
+              key={i}
+              style={[
+                chartStyles.barWrapper,
+                i < BAR_HEIGHTS.length - 1 && { marginRight: BAR_GAP },
+              ]}
+            >
+              <Animated.View
+                style={{
+                  width: "100%",
+                  height: `${baseH * 80}%`,
+                  backgroundColor: "#D6CFF0",
+                  borderRadius: 3,
+                  opacity,
+                }}
+              />
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 function BarChart({
   data,
   color,
   loading,
+  error,
   onSelectPoint,
+  onRetry,
 }: {
   data: HistoryPoint[];
   color: string;
   loading: boolean;
+  error: boolean;
   onSelectPoint: (point: HistoryPoint | null) => void;
+  onRetry: () => void;
 }) {
   const [timeRange, setTimeRange] = useState<TimeRange>("45d");
   const [selectedBar, setSelectedBar] = useState<number | null>(null);
   const [barsSize, setBarsSize] = useState({ width: 0, height: 0 });
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const barAnims = useRef<Animated.Value[]>([]);
 
   const cfg = TIME_RANGES.find((r) => r.key === timeRange)!;
   const raw = data.slice(-cfg.days);
   const points = sample(raw, cfg.maxBars);
   const max = Math.max(...points.map((p) => p.balance_usd), 0.01);
+
+  // Animate bars growing when data changes
+  useEffect(() => {
+    if (points.length === 0) return;
+    barAnims.current = points.map(() => new Animated.Value(0));
+    Animated.stagger(
+      10,
+      barAnims.current.map((a) =>
+        Animated.timing(a, {
+          toValue: 1,
+          duration: 400,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: false,
+        }),
+      ),
+    ).start();
+  }, [data, timeRange]);
 
   const clearSelection = () => {
     setSelectedBar(null);
@@ -147,23 +259,26 @@ function BarChart({
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   };
 
-  // Reset selected bar when range changes
   const handleRangeChange = (r: TimeRange) => {
     setTimeRange(r);
     clearSelection();
   };
 
   if (loading) {
+    return <SkeletonBars />;
+  }
+
+  if (error) {
     return (
       <View style={chartStyles.outer}>
-        <ActivityIndicator color={color} />
+        <ErrorRetry message="Unable to load chart data" onRetry={onRetry} />
       </View>
     );
   }
 
   if (points.length === 0) {
     return (
-      <View style={chartStyles.outer}>
+      <View style={[chartStyles.outer, { justifyContent: "center", alignItems: "center" }]}>
         <Text style={chartStyles.emptyText}>No data available</Text>
       </View>
     );
@@ -186,9 +301,7 @@ function BarChart({
 
   return (
     <View style={chartStyles.outer}>
-      {/* Filter row: date pill left, range pills right */}
       <View style={chartStyles.rangeRow}>
-        {/* Date pill — resets on tap when a bar is selected */}
         <TouchableOpacity
           style={[
             chartStyles.datePill,
@@ -197,9 +310,7 @@ function BarChart({
               backgroundColor: color + "12",
             },
           ]}
-          onPress={() => {
-            if (hasSelection) clearSelection();
-          }}
+          onPress={() => { if (hasSelection) clearSelection(); }}
           activeOpacity={hasSelection ? 0.7 : 1}
         >
           <Text style={[chartStyles.datePillText, hasSelection && { color }]}>
@@ -207,20 +318,11 @@ function BarChart({
           </Text>
           {hasSelection && (
             <Svg width={9} height={9} viewBox="0 0 10 10" fill="none">
-              <Path
-                d="M2 2l6 6M8 2l-6 6"
-                stroke={color}
-                strokeWidth={1.5}
-                strokeLinecap="round"
-              />
+              <Path d="M2 2l6 6M8 2l-6 6" stroke={color} strokeWidth={1.5} strokeLinecap="round" />
             </Svg>
           )}
         </TouchableOpacity>
-
-        {/* Spacer */}
         <View style={{ flex: 1 }} />
-
-        {/* Range pills */}
         {TIME_RANGES.map((r) => {
           const active = timeRange === r.key;
           return (
@@ -229,46 +331,33 @@ function BarChart({
               onPress={() => handleRangeChange(r.key)}
               style={[
                 chartStyles.rangeBtn,
-                active && {
-                  backgroundColor: color + "18",
-                  borderColor: color + "50",
-                },
+                active && { backgroundColor: color + "18", borderColor: color + "50" },
               ]}
               activeOpacity={0.7}
             >
-              <Text style={[chartStyles.rangeText, active && { color }]}>
-                {r.label}
-              </Text>
+              <Text style={[chartStyles.rangeText, active && { color }]}>{r.label}</Text>
             </TouchableOpacity>
           );
         })}
       </View>
 
-      {/* Bars */}
       <View
         style={chartStyles.barsRow}
         onLayout={(e) =>
-          setBarsSize({
-            width: e.nativeEvent.layout.width,
-            height: e.nativeEvent.layout.height,
-          })
+          setBarsSize({ width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height })
         }
       >
         {barsSize.height > 0 &&
           points.map((point, i) => {
             const heightPct = point.balance_usd / max;
-            const barHeight = Math.min(
-              barsSize.height,
-              Math.max(4, heightPct * barsSize.height),
-            );
+            const targetHeight = Math.min(barsSize.height, Math.max(4, heightPct * barsSize.height));
+            const anim = barAnims.current[i];
             const isSelected = selectedBar === i;
+
             return (
               <TouchableOpacity
                 key={i}
-                style={[
-                  chartStyles.barWrapper,
-                  i < points.length - 1 && { marginRight: BAR_GAP },
-                ]}
+                style={[chartStyles.barWrapper, i < points.length - 1 && { marginRight: BAR_GAP }]}
                 onPress={() => {
                   if (isSelected) {
                     clearSelection();
@@ -280,10 +369,15 @@ function BarChart({
                 }}
                 activeOpacity={1}
               >
-                <View
+                <Animated.View
                   style={{
                     width: "100%",
-                    height: barHeight,
+                    height: anim
+                      ? anim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [0, targetHeight],
+                        })
+                      : targetHeight,
                     backgroundColor: color,
                     opacity: isSelected ? 1 : 0.25,
                     borderRadius: 3,
@@ -294,22 +388,11 @@ function BarChart({
           })}
       </View>
 
-      {/* Date labels — flex space-between, never overflows */}
       <View style={chartStyles.labelsRow}>
-        {[
-          0,
-          Math.round(points.length * 0.25),
-          Math.round(points.length * 0.5),
-          Math.round(points.length * 0.75),
-          points.length - 1,
-        ]
-          .filter(
-            (idx, pos, arr) => idx < points.length && arr.indexOf(idx) === pos,
-          )
+        {[0, Math.round(points.length * 0.25), Math.round(points.length * 0.5), Math.round(points.length * 0.75), points.length - 1]
+          .filter((idx, pos, arr) => idx < points.length && arr.indexOf(idx) === pos)
           .map((idx) => (
-            <Text key={idx} style={chartStyles.dateLabel}>
-              {formatDate(points[idx].date)}
-            </Text>
+            <Text key={idx} style={chartStyles.dateLabel}>{formatDate(points[idx].date)}</Text>
           ))}
       </View>
     </View>
@@ -317,68 +400,23 @@ function BarChart({
 }
 
 const chartStyles = StyleSheet.create({
-  outer: {
-    flex: 1,
-    padding: 16,
-  },
-  rangeRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginBottom: 10,
-  },
+  outer: { flex: 1, padding: 16 },
+  rangeRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 10 },
   datePill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 100,
-    borderWidth: 1,
-    borderColor: "#E5E0F5",
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 100, borderWidth: 1, borderColor: "#E5E0F5",
   },
-  datePillText: {
-    fontSize: 11,
-    fontFamily: "HankenGrotesk_500Medium",
-    color: "#9B97A6",
-  },
-  rangeBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 100,
-    borderWidth: 1,
-    borderColor: "#E5E0F5",
-  },
-  rangeText: {
-    fontSize: 11,
-    fontFamily: "HankenGrotesk_500Medium",
-    color: "#9B97A6",
-  },
-  barsRow: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "flex-end",
-  },
-  barWrapper: {
-    flex: 1,
-    justifyContent: "flex-end",
-  },
-  labelsRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: 6,
-    paddingHorizontal: 0,
-  },
-  dateLabel: {
-    fontSize: 9,
-    fontFamily: "HankenGrotesk_400Regular",
-    color: "#9B97A6",
-  },
-  emptyText: {
-    fontSize: 13,
-    fontFamily: "HankenGrotesk_400Regular",
-    color: "#9B97A6",
-  },
+  datePillText: { fontSize: 11, fontFamily: "HankenGrotesk_500Medium", color: "#9B97A6" },
+  rangeBtn: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 100, borderWidth: 1, borderColor: "#E5E0F5" },
+  rangeText: { fontSize: 11, fontFamily: "HankenGrotesk_500Medium", color: "#9B97A6" },
+  barsRow: { flex: 1, flexDirection: "row", alignItems: "flex-end" },
+  barWrapper: { flex: 1, justifyContent: "flex-end" },
+  labelsRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 },
+  dateLabel: { fontSize: 9, fontFamily: "HankenGrotesk_400Regular", color: "#9B97A6" },
+  emptyText: { fontSize: 13, fontFamily: "HankenGrotesk_400Regular", color: "#9B97A6" },
+  errorText: { fontSize: 13, fontFamily: "HankenGrotesk_500Medium", color: "#9B97A6" },
+  retryBtn: { marginTop: 8, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 100, backgroundColor: "#E2D9F9" },
+  retryText: { fontSize: 12, fontFamily: "HankenGrotesk_600SemiBold", color: "#7F56D9" },
 });
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -398,86 +436,190 @@ export default function PortfolioScreen() {
 
   const [activeTab, setActiveTab] = useState<TabKey>("all");
   const [portfolio, setPortfolio] = useState<PortfolioEntry[]>([]);
+  const [portfolioLoading, setPortfolioLoading] = useState(!!activeWallet);
+  const [portfolioError, setPortfolioError] = useState(false);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(!!activeWallet);
+  const [historyError, setHistoryError] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState<HistoryPoint | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Fetch portfolio (balances + visible tickers)
+  const allHistoryRef = useRef<HistoryPoint[]>([]);
+
+  const fetchPortfolio = useCallback(async (walletId: string) => {
+    setPortfolioError(false);
+    setPortfolioLoading(true);
+    try {
+      const json = await fetchJSON<{ portfolio?: PortfolioEntry[] }>(
+        `${API_BASE}/mobile/user/wallet/portfolio?device_id=${DEVICE_ID}&wallet_address=${walletId}`,
+      );
+      setPortfolio(json?.portfolio ?? []);
+    } catch {
+      setPortfolioError(true);
+    } finally {
+      setPortfolioLoading(false);
+    }
+  }, []);
+
+  const fetchHistory = useCallback(async (walletId: string) => {
+    setHistoryError(false);
+    setLoadingHistory(true);
+    try {
+      const json = await fetchJSON<{ result?: HistoryPoint[] }>(
+        `${API_BASE}/mobile/user/wallet/balance_history?userAddress=${walletId}`,
+      );
+      const data: HistoryPoint[] = json?.result ?? [];
+      allHistoryRef.current = data;
+      setHistory(data);
+    } catch {
+      setHistoryError(true);
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, []);
+
+  // Fetch on wallet change — skip if same wallet already loaded
+  const lastFetchedWallet = useRef<string | null>(null);
   useEffect(() => {
     if (!activeWallet) return;
+    if (lastFetchedWallet.current === activeWallet.walletId) return;
+    lastFetchedWallet.current = activeWallet.walletId;
     setPortfolio([]);
     setActiveTab("all");
     setSelectedPoint(null);
-    async function fetchPortfolio() {
-      try {
-        const deviceId =
-          (await AsyncStorage.getItem("lucidly_device_id")) ?? "lucidly-ios";
-        const res = await fetch(
-          `https://api.lucidly.finance/services/mobile/user/wallet/portfolio?device_id=${deviceId}&wallet_address=${activeWallet!.walletId}`,
-        );
-        const json = await res.json();
-        setPortfolio(json?.portfolio ?? []);
-      } catch {
-        // silently ignore
-      }
-    }
-    fetchPortfolio();
-  }, [activeWallet?.walletId]);
+    allHistoryRef.current = [];
+    setHistory([]);
+    fetchPortfolio(activeWallet.walletId);
+    fetchHistory(activeWallet.walletId);
+  }, [activeWallet?.walletId, fetchPortfolio, fetchHistory]);
 
-  // Fetch balance history whenever active wallet changes
+  // Per-strategy history
+  const strategyGraphUrl =
+    activeTab !== "all"
+      ? portfolio.find((p) => p.ticker === activeTab)?.graph_url ?? null
+      : null;
+
   useEffect(() => {
-    if (!activeWallet) return;
+    if (!activeWallet || activeTab === "all") {
+      if (activeTab === "all" && allHistoryRef.current.length > 0) {
+        setHistory(allHistoryRef.current);
+        setLoadingHistory(false);
+        setHistoryError(false);
+      }
+      return;
+    }
+    setSelectedPoint(null);
+    if (!strategyGraphUrl) { setHistory([]); return; }
+
+    let cancelled = false;
     setHistory([]);
     setLoadingHistory(true);
-    async function fetchHistory() {
+    setHistoryError(false);
+    async function fetchStrategyHistory() {
       try {
-        const res = await fetch(
-          `https://api.lucidly.finance/services/mobile/user/wallet/balance_history?userAddress=${activeWallet!.walletId}`,
-        );
-        const json = await res.json();
-        setHistory(json?.result ?? []);
+        const json = await fetchJSON<{ result?: Array<Record<string, string>> }>(strategyGraphUrl!);
+        if (cancelled) return;
+        const result = json?.result ?? [];
+        setHistory(result.map((p) => ({
+          balance_usd: parseFloat(p.balance ?? "0"),
+          date: p.date,
+        })));
       } catch {
-        // silently ignore
+        if (!cancelled) setHistoryError(true);
       } finally {
-        setLoadingHistory(false);
+        if (!cancelled) setLoadingHistory(false);
       }
     }
-    fetchHistory();
-  }, [activeWallet?.walletId]);
+    fetchStrategyHistory();
+    return () => { cancelled = true; };
+  }, [activeTab, strategyGraphUrl]);
 
-  // Only show "all" + tickers with balance > 0
+  // Pull-to-refresh
+  const onRefresh = useCallback(async () => {
+    if (!activeWallet) return;
+    setRefreshing(true);
+    await Promise.all([
+      fetchPortfolio(activeWallet.walletId),
+      fetchHistory(activeWallet.walletId),
+    ]);
+    setRefreshing(false);
+  }, [activeWallet?.walletId, fetchPortfolio, fetchHistory]);
+
+  const handleRetryHistory = () => {
+    if (!activeWallet) return;
+    if (activeTab === "all") {
+      fetchHistory(activeWallet.walletId);
+    } else if (strategyGraphUrl) {
+      // Re-trigger strategy fetch by toggling tab
+      const tab = activeTab;
+      setActiveTab("all");
+      setTimeout(() => setActiveTab(tab), 0);
+    }
+  };
+
+  // Derived data
   const visibleTickers = [
     "all",
     ...portfolio.filter((p) => p.balance > 0).map((p) => p.ticker),
   ];
 
-  // Data for the currently active tab
   const activeData = portfolio.find(
     (p) => p.ticker === (activeTab === "all" ? "all" : activeTab),
   );
 
-  // If a bar is selected, show that bar's historical balance instead
-  const displayBalance = selectedPoint
-    ? `$${selectedPoint.balance_usd.toLocaleString("en-US", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      })}`
-    : activeData
-      ? `$${activeData.balance.toLocaleString("en-US", {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })}`
-      : "$---";
+  const isLoading = portfolioLoading && !activeData;
 
-  const pnl = activeData ? activeData.pnl : null;
-  const pnlText =
-    !selectedPoint && pnl != null
-      ? `${pnl >= 0 ? "+" : ""}$${Math.abs(pnl).toFixed(2)}`
+  const displayBalance = selectedPoint
+    ? `$${selectedPoint.balance_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : activeData
+      ? `$${activeData.balance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
       : null;
 
-  // Bar color for active tab
+  const pnl = activeData ? activeData.pnl : null;
+  const pnlPct =
+    activeData && activeData.balance > 0 && pnl != null
+      ? (pnl / (activeData.balance - pnl)) * 100
+      : null;
+  const pnlText =
+    !selectedPoint && pnl != null
+      ? `${pnl >= 0 ? "+" : ""}$${Math.abs(pnl).toFixed(2)}${pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%)` : ""}`
+      : null;
+
   const activeTabConfig = TABS.find((t) => t.key === activeTab);
   const barColor = activeTabConfig?.barColor ?? "#7F56D9";
+
+  // Tab indicator animation
+  const [tabLayouts, setTabLayouts] = useState<
+    Record<string, { x: number; width: number }>
+  >({});
+  const indicatorX = useRef(new Animated.Value(0)).current;
+  const indicatorW = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const layout = tabLayouts[activeTab];
+    if (!layout) return;
+    Animated.parallel([
+      Animated.spring(indicatorX, {
+        toValue: layout.x,
+        damping: 20,
+        stiffness: 200,
+        useNativeDriver: false,
+      }),
+      Animated.spring(indicatorW, {
+        toValue: layout.width,
+        damping: 20,
+        stiffness: 200,
+        useNativeDriver: false,
+      }),
+    ]).start();
+  }, [activeTab, tabLayouts]);
+
+  // Zero balance state (portfolio loaded but all $0)
+  const allZero =
+    !portfolioLoading &&
+    portfolio.length > 0 &&
+    portfolio.every((p) => p.ticker === "all" || p.balance === 0) &&
+    (portfolio.find((p) => p.ticker === "all")?.balance ?? 0) === 0;
 
   if (!activeWallet) {
     return (
@@ -485,14 +627,14 @@ export default function PortfolioScreen() {
         <View style={styles.emptyState}>
           <Text style={styles.emptyTitle}>No Wallet Connected</Text>
           <Text style={styles.emptySubtitle}>
-            Connect a wallet to view your portfolio.
+            Add a wallet to view your portfolio.
           </Text>
           <TouchableOpacity
             style={styles.button}
             onPress={() => router.navigate("/login")}
             activeOpacity={0.8}
           >
-            <Text style={styles.buttonLabel}>Connect Wallet</Text>
+            <Text style={styles.buttonLabel}>Add Wallet</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -516,88 +658,137 @@ export default function PortfolioScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Segment Control */}
       <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.tabsContainer}
-        style={styles.tabsScroll}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ flexGrow: 1 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#7F56D9"
+            colors={["#7F56D9"]}
+          />
+        }
       >
-        {TABS.filter(
-          (tab) =>
-            visibleTickers.length === 0 ||
-            visibleTickers.includes(tab.key === "all" ? "all" : tab.key),
-        ).map((tab) => {
-          const active = activeTab === tab.key;
-          return (
-            <TouchableOpacity
-              key={tab.key}
+        {/* Segment Control */}
+        <View style={styles.tabsWrapper}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.tabsContainer}
+            style={styles.tabsScroll}
+          >
+            {/* Animated indicator */}
+            <Animated.View
               style={[
-                styles.tab,
-                active && styles.tabActive,
-                active &&
-                  (tab as any).activeBg && {
-                    backgroundColor: (tab as any).activeBg,
-                    borderColor: (tab as any).activeBorder,
-                  },
+                styles.tabIndicator,
+                {
+                  left: indicatorX,
+                  width: indicatorW,
+                  backgroundColor: activeTabConfig?.activeBg ?? "#E2D9F9",
+                  borderColor: activeTabConfig?.activeBorder ?? "#CBBAF1",
+                },
               ]}
-              onPress={() => setActiveTab(tab.key)}
+            />
+            {TABS.filter(
+              (tab) =>
+                portfolioLoading ||
+                visibleTickers.includes(tab.key === "all" ? "all" : tab.key),
+            ).map((tab) => {
+              const active = activeTab === tab.key;
+              return (
+                <TouchableOpacity
+                  key={tab.key}
+                  style={styles.tab}
+                  onPress={() => setActiveTab(tab.key)}
+                  activeOpacity={0.8}
+                  onLayout={(e) => {
+                    const { x, width } = e.nativeEvent.layout;
+                    setTabLayouts((prev) => ({
+                      ...prev,
+                      [tab.key]: { x, width },
+                    }));
+                  }}
+                >
+                  <View style={[styles.tabIconWrapper, tab.tint && !active && { opacity: 0.6 }]}>
+                    <Image
+                      source={tab.icon}
+                      style={styles.tabIcon}
+                      contentFit="cover"
+                      tintColor={active && tab.tint ? "#7F56D9" : undefined}
+                    />
+                  </View>
+                  <Text
+                    style={[
+                      styles.tabLabel,
+                      active && styles.tabLabelActive,
+                      active && tab.textColor && { color: tab.textColor },
+                    ]}
+                  >
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+
+        {/* Balance */}
+        <View style={styles.balanceSection}>
+          <Text style={styles.balanceLabel}>Your Balance</Text>
+          <View style={styles.balanceRow}>
+            {isLoading ? (
+              <Skeleton width={200} height={44} borderRadius={10} />
+            ) : portfolioError ? (
+              <TouchableOpacity
+                onPress={() => activeWallet && fetchPortfolio(activeWallet.walletId)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.balanceError}>Unable to load balance. Tap to retry.</Text>
+              </TouchableOpacity>
+            ) : displayBalance ? (
+              <Text style={styles.balanceValue}>{displayBalance}</Text>
+            ) : (
+              <Skeleton width={200} height={44} borderRadius={10} />
+            )}
+            {pnlText != null && (
+              <Text style={[styles.pnl, { color: pnl! >= 0 ? "#22C55E" : "#EF4444" }]}>
+                {pnlText}
+              </Text>
+            )}
+          </View>
+        </View>
+
+        {/* Zero balance state */}
+        {allZero ? (
+          <View style={styles.zeroState}>
+            <Text style={styles.zeroTitle}>No deposits yet</Text>
+            <Text style={styles.zeroSubtitle}>
+              Deposit into a strategy to start tracking your portfolio here.
+            </Text>
+            <TouchableOpacity
+              style={styles.zeroButton}
+              onPress={() => router.navigate("/(tabs)/yields")}
               activeOpacity={0.8}
             >
-              <View
-                style={[
-                  styles.tabIconWrapper,
-                  tab.tint && !active && { opacity: 0.6 },
-                ]}
-              >
-                <Image
-                  source={tab.icon}
-                  style={styles.tabIcon}
-                  contentFit="cover"
-                  tintColor={active && tab.tint ? "#7F56D9" : undefined}
-                />
-              </View>
-              <Text
-                style={[
-                  styles.tabLabel,
-                  active && styles.tabLabelActive,
-                  active &&
-                    (tab as any).textColor && {
-                      color: (tab as any).textColor,
-                    },
-                ]}
-              >
-                {tab.label}
-              </Text>
+              <Text style={styles.zeroButtonText}>View Strategies</Text>
             </TouchableOpacity>
-          );
-        })}
+          </View>
+        ) : (
+          /* Chart Card */
+          <View style={[styles.chartCard, { marginBottom: 94 + insets.bottom }]}>
+            <BarChart
+              data={history}
+              color={barColor}
+              loading={loadingHistory}
+              error={historyError}
+              onSelectPoint={setSelectedPoint}
+              onRetry={handleRetryHistory}
+            />
+          </View>
+        )}
       </ScrollView>
-
-      {/* Balance */}
-      <View style={styles.balanceSection}>
-        <Text style={styles.balanceLabel}>Your Balance</Text>
-        <View style={styles.balanceRow}>
-          <Text style={styles.balanceValue}>{displayBalance}</Text>
-          {pnlText != null && (
-            <Text
-              style={[styles.pnl, { color: pnl! >= 0 ? "#22C55E" : "#EF4444" }]}
-            >
-              {pnlText}
-            </Text>
-          )}
-        </View>
-      </View>
-
-      {/* Chart Card */}
-      <View style={[styles.chartCard, { marginBottom: 94 + insets.bottom }]}>
-        <BarChart
-          data={history}
-          color={barColor}
-          loading={loadingHistory}
-          onSelectPoint={setSelectedPoint}
-        />
-      </View>
     </View>
   );
 }
@@ -605,142 +796,70 @@ export default function PortfolioScreen() {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#F4F0FF",
-  },
+  container: { flex: 1, backgroundColor: "#F4F0FF" },
 
   // Header
   header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 16,
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    paddingHorizontal: 16, paddingTop: 16, paddingBottom: 16,
   },
-  headerLeft: {
-    width: 32,
-    height: 32,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  walletName: {
-    fontSize: 17,
-    fontFamily: "HankenGrotesk_600SemiBold",
-    color: "#000000",
-  },
+  headerLeft: { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
+  walletName: { fontSize: 17, fontFamily: "HankenGrotesk_600SemiBold", color: "#000000" },
 
   // Segment
-  tabsScroll: {
-    flexGrow: 0,
-    marginBottom: 20,
-  },
-  tabsContainer: {
-    paddingHorizontal: 16,
-    gap: 8,
+  tabsWrapper: { position: "relative", marginBottom: 20 },
+  tabsScroll: { flexGrow: 0 },
+  tabsContainer: { paddingHorizontal: 16, gap: 8 },
+  tabIndicator: {
+    position: "absolute", top: 0, bottom: 0,
+    borderRadius: 100, borderWidth: 1,
   },
   tab: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 100,
-    borderWidth: 1,
-    borderColor: "#D6CFF0",
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 100, borderWidth: 1, borderColor: "#D6CFF0",
   },
-  tabActive: {
-    backgroundColor: "#E2D9F9",
-    borderColor: "#CBBAF1",
-  },
-  tabIconWrapper: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    overflow: "hidden",
-  },
-  tabIcon: {
-    width: 20,
-    height: 20,
-  },
-  tabLabel: {
-    fontSize: 13,
-    fontFamily: "HankenGrotesk_500Medium",
-    color: "#626066",
-  },
-  tabLabelActive: {
-    color: "#7F56D9",
-  },
+  tabIconWrapper: { width: 20, height: 20, borderRadius: 10, overflow: "hidden" },
+  tabIcon: { width: 20, height: 20 },
+  tabLabel: { fontSize: 13, fontFamily: "HankenGrotesk_500Medium", color: "#626066" },
+  tabLabelActive: { color: "#7F56D9" },
 
   // Balance
-  balanceSection: {
-    paddingHorizontal: 16,
-    marginBottom: 16,
-    gap: 4,
-  },
-  balanceLabel: {
-    fontSize: 13,
-    fontFamily: "HankenGrotesk_400Regular",
-    color: "#626066",
-  },
-  balanceRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "space-between",
-  },
-  balanceValue: {
-    fontSize: 40,
-    fontFamily: "HankenGrotesk_700Bold",
-    color: "#000000",
-    lineHeight: 48,
-  },
-  pnl: {
-    fontSize: 14,
-    fontFamily: "HankenGrotesk_500Medium",
-    paddingBottom: 6,
-  },
+  balanceSection: { paddingHorizontal: 16, marginBottom: 16, gap: 4 },
+  balanceLabelRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  balanceLabel: { fontSize: 13, fontFamily: "HankenGrotesk_400Regular", color: "#626066" },
+  strategyBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 100, borderWidth: 1 },
+  strategyBadgeText: { fontSize: 11, fontFamily: "HankenGrotesk_600SemiBold" },
+  balanceRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between" },
+  balanceValue: { fontSize: 40, fontFamily: "HankenGrotesk_700Bold", color: "#000000", lineHeight: 48 },
+  balanceError: { fontSize: 14, fontFamily: "HankenGrotesk_500Medium", color: "#EF4444", lineHeight: 48 },
+  pnl: { fontSize: 13, fontFamily: "HankenGrotesk_500Medium", paddingBottom: 6 },
 
   // Chart
   chartCard: {
-    flex: 1,
-    marginHorizontal: 16,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "#E2D9F9",
+    flex: 1, marginHorizontal: 16, borderRadius: 20, borderWidth: 1, borderColor: "#E2D9F9", minHeight: 280,
   },
 
-  // Empty state
-  emptyState: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 12,
-    paddingHorizontal: 32,
+  // Zero balance
+  zeroState: {
+    flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32, paddingTop: 40, gap: 10,
   },
-  emptyTitle: {
-    fontSize: 20,
-    fontFamily: "HankenGrotesk_700Bold",
-    color: "#000000",
+  zeroTitle: { fontSize: 18, fontFamily: "HankenGrotesk_700Bold", color: "#000000" },
+  zeroSubtitle: {
+    fontSize: 13, fontFamily: "HankenGrotesk_400Regular", color: "#626066",
+    textAlign: "center", lineHeight: 20, marginBottom: 4,
   },
+  zeroButton: {
+    backgroundColor: "#E2D9F9", borderRadius: 100, paddingVertical: 12, paddingHorizontal: 24,
+  },
+  zeroButtonText: { fontSize: 14, fontFamily: "HankenGrotesk_600SemiBold", color: "#7F56D9" },
+
+  // Empty state (no wallet)
+  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, paddingHorizontal: 32 },
+  emptyTitle: { fontSize: 20, fontFamily: "HankenGrotesk_700Bold", color: "#000000" },
   emptySubtitle: {
-    fontSize: 14,
-    fontFamily: "HankenGrotesk_400Regular",
-    color: "#626066",
-    textAlign: "center",
-    lineHeight: 22,
-    marginBottom: 8,
+    fontSize: 14, fontFamily: "HankenGrotesk_400Regular", color: "#626066",
+    textAlign: "center", lineHeight: 22, marginBottom: 8,
   },
-  button: {
-    backgroundColor: "#E2D9F9",
-    borderRadius: 100,
-    paddingVertical: 14,
-    paddingHorizontal: 32,
-    alignItems: "center",
-  },
-  buttonLabel: {
-    fontSize: 15,
-    fontFamily: "HankenGrotesk_600SemiBold",
-    color: "#7F56D9",
-  },
+  button: { backgroundColor: "#E2D9F9", borderRadius: 100, paddingVertical: 14, paddingHorizontal: 32, alignItems: "center" },
+  buttonLabel: { fontSize: 15, fontFamily: "HankenGrotesk_600SemiBold", color: "#7F56D9" },
 });
