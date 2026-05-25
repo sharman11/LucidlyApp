@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -10,8 +10,6 @@ import {
   Linking,
   ScrollView,
   RefreshControl,
-  Animated,
-  Easing,
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { Image } from "expo-image";
@@ -76,14 +74,6 @@ function formatPoints(val: number): string {
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
-
-type PointsResult = {
-  total_points: string;
-  drops_tier: string;
-  tier_multiplier: string;
-  referral_bonus: string;
-  deposit_exposure: string;
-};
 
 export default function PointsScreen() {
   const insets = useSafeAreaInsets();
@@ -352,6 +342,12 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 16,
     gap: 12,
+    // Phone-sized on iPad: the entire scroll content (all cards) caps at
+    // iPhone-Pro-Max width and centers. The screen background still bleeds
+    // full width via the outer container.
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
 
   // Card base

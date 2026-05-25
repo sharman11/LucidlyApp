@@ -15,8 +15,10 @@ import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Path } from "react-native-svg";
 import { useAuth } from "@/context/auth";
-import { API_BASE, DEVICE_ID, AUTO_RESET_MS, BAR_GAP } from "@/constants/api";
+import { API_BASE, AUTO_RESET_MS, BAR_GAP } from "@/constants/api";
 import { fetchJSON } from "@/lib/fetch";
+import { getDeviceId } from "@/lib/device-id";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ErrorRetry } from "@/components/ui/error-retry";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -243,6 +245,14 @@ function BarChart({
     ).start();
   }, [data, timeRange]);
 
+  // Drop any pending auto-reset timer on unmount so we don't fire setState
+  // (or call the parent's onSelectPoint) after this chart has gone away.
+  useEffect(() => {
+    return () => {
+      if (resetTimer.current) clearTimeout(resetTimer.current);
+    };
+  }, []);
+
   const clearSelection = () => {
     setSelectedBar(null);
     onSelectPoint(null);
@@ -433,127 +443,111 @@ export default function PortfolioScreen() {
   const { wallets, activeWalletId } = useAuth();
   const activeWallet =
     wallets.find((w) => w.walletId === activeWalletId) ?? wallets[0] ?? null;
+  const walletId = activeWallet?.walletId ?? null;
+  const queryClient = useQueryClient();
 
   const [activeTab, setActiveTab] = useState<TabKey>("all");
-  const [portfolio, setPortfolio] = useState<PortfolioEntry[]>([]);
-  const [portfolioLoading, setPortfolioLoading] = useState(!!activeWallet);
-  const [portfolioError, setPortfolioError] = useState(false);
-  const [history, setHistory] = useState<HistoryPoint[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(!!activeWallet);
-  const [historyError, setHistoryError] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState<HistoryPoint | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const allHistoryRef = useRef<HistoryPoint[]>([]);
-
-  const fetchPortfolio = useCallback(async (walletId: string) => {
-    setPortfolioError(false);
-    setPortfolioLoading(true);
-    try {
+  const portfolioQuery = useQuery({
+    queryKey: ["portfolio", walletId],
+    queryFn: async ({ signal }) => {
+      const deviceId = await getDeviceId();
       const json = await fetchJSON<{ portfolio?: PortfolioEntry[] }>(
-        `${API_BASE}/mobile/user/wallet/portfolio?device_id=${DEVICE_ID}&wallet_address=${walletId}`,
+        `${API_BASE}/mobile/user/wallet/portfolio?device_id=${deviceId}&wallet_address=${walletId}`,
+        { signal },
       );
-      setPortfolio(json?.portfolio ?? []);
-    } catch {
-      setPortfolioError(true);
-    } finally {
-      setPortfolioLoading(false);
-    }
-  }, []);
+      return json?.portfolio ?? [];
+    },
+    enabled: !!walletId,
+  });
+  const portfolio = portfolioQuery.data ?? [];
+  const portfolioLoading = portfolioQuery.isPending && !!walletId;
+  const portfolioError = portfolioQuery.isError;
 
-  const fetchHistory = useCallback(async (walletId: string) => {
-    setHistoryError(false);
-    setLoadingHistory(true);
-    try {
+  // Reset tab + selection when active wallet changes
+  const lastWalletId = useRef<string | null>(null);
+  useEffect(() => {
+    if (walletId !== lastWalletId.current) {
+      lastWalletId.current = walletId;
+      setActiveTab("all");
+      setSelectedPoint(null);
+    }
+  }, [walletId]);
+
+  const allHistoryQuery = useQuery({
+    queryKey: ["balance-history", walletId],
+    queryFn: async ({ signal }) => {
       const json = await fetchJSON<{ result?: HistoryPoint[] }>(
         `${API_BASE}/mobile/user/wallet/balance_history?userAddress=${walletId}`,
+        { signal },
       );
-      const data: HistoryPoint[] = json?.result ?? [];
-      allHistoryRef.current = data;
-      setHistory(data);
-    } catch {
-      setHistoryError(true);
-    } finally {
-      setLoadingHistory(false);
-    }
-  }, []);
+      return json?.result ?? [];
+    },
+    enabled: !!walletId,
+  });
 
-  // Fetch on wallet change — skip if same wallet already loaded
-  const lastFetchedWallet = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeWallet) return;
-    if (lastFetchedWallet.current === activeWallet.walletId) return;
-    lastFetchedWallet.current = activeWallet.walletId;
-    setPortfolio([]);
-    setActiveTab("all");
-    setSelectedPoint(null);
-    allHistoryRef.current = [];
-    setHistory([]);
-    fetchPortfolio(activeWallet.walletId);
-    fetchHistory(activeWallet.walletId);
-  }, [activeWallet?.walletId, fetchPortfolio, fetchHistory]);
-
-  // Per-strategy history
   const strategyGraphUrl =
     activeTab !== "all"
       ? portfolio.find((p) => p.ticker === activeTab)?.graph_url ?? null
       : null;
 
+  const strategyHistoryQuery = useQuery({
+    queryKey: ["strategy-history", strategyGraphUrl],
+    queryFn: async ({ signal }) => {
+      const json = await fetchJSON<{ result?: { balance?: string; date: string }[] }>(
+        strategyGraphUrl!,
+        { signal },
+      );
+      return (json?.result ?? []).map((p) => ({
+        balance_usd: parseFloat(p.balance ?? "0"),
+        date: p.date,
+      }));
+    },
+    enabled: !!strategyGraphUrl,
+  });
+
+  const history: HistoryPoint[] =
+    activeTab === "all"
+      ? allHistoryQuery.data ?? []
+      : strategyHistoryQuery.data ?? [];
+  const loadingHistory =
+    activeTab === "all"
+      ? allHistoryQuery.isPending && !!walletId
+      : strategyHistoryQuery.isPending && !!strategyGraphUrl;
+  const historyError =
+    activeTab === "all"
+      ? allHistoryQuery.isError
+      : strategyHistoryQuery.isError;
+
+  // Drop the selected chart point when the user switches tabs.
   useEffect(() => {
-    if (!activeWallet || activeTab === "all") {
-      if (activeTab === "all" && allHistoryRef.current.length > 0) {
-        setHistory(allHistoryRef.current);
-        setLoadingHistory(false);
-        setHistoryError(false);
-      }
-      return;
-    }
     setSelectedPoint(null);
-    if (!strategyGraphUrl) { setHistory([]); return; }
+  }, [activeTab]);
 
-    let cancelled = false;
-    setHistory([]);
-    setLoadingHistory(true);
-    setHistoryError(false);
-    async function fetchStrategyHistory() {
-      try {
-        const json = await fetchJSON<{ result?: Array<Record<string, string>> }>(strategyGraphUrl!);
-        if (cancelled) return;
-        const result = json?.result ?? [];
-        setHistory(result.map((p) => ({
-          balance_usd: parseFloat(p.balance ?? "0"),
-          date: p.date,
-        })));
-      } catch {
-        if (!cancelled) setHistoryError(true);
-      } finally {
-        if (!cancelled) setLoadingHistory(false);
-      }
-    }
-    fetchStrategyHistory();
-    return () => { cancelled = true; };
-  }, [activeTab, strategyGraphUrl]);
-
-  // Pull-to-refresh
   const onRefresh = useCallback(async () => {
-    if (!activeWallet) return;
+    if (!walletId) return;
     setRefreshing(true);
     await Promise.all([
-      fetchPortfolio(activeWallet.walletId),
-      fetchHistory(activeWallet.walletId),
+      queryClient.invalidateQueries({ queryKey: ["portfolio", walletId] }),
+      queryClient.invalidateQueries({
+        queryKey: ["balance-history", walletId],
+      }),
+      strategyGraphUrl
+        ? queryClient.invalidateQueries({
+            queryKey: ["strategy-history", strategyGraphUrl],
+          })
+        : Promise.resolve(),
     ]);
     setRefreshing(false);
-  }, [activeWallet?.walletId, fetchPortfolio, fetchHistory]);
+  }, [queryClient, walletId, strategyGraphUrl]);
 
   const handleRetryHistory = () => {
-    if (!activeWallet) return;
     if (activeTab === "all") {
-      fetchHistory(activeWallet.walletId);
+      allHistoryQuery.refetch();
     } else if (strategyGraphUrl) {
-      // Re-trigger strategy fetch by toggling tab
-      const tab = activeTab;
-      setActiveTab("all");
-      setTimeout(() => setActiveTab(tab), 0);
+      strategyHistoryQuery.refetch();
     }
   };
 
@@ -742,7 +736,7 @@ export default function PortfolioScreen() {
               <Skeleton width={200} height={44} borderRadius={10} />
             ) : portfolioError ? (
               <TouchableOpacity
-                onPress={() => activeWallet && fetchPortfolio(activeWallet.walletId)}
+                onPress={() => portfolioQuery.refetch()}
                 activeOpacity={0.7}
               >
                 <Text style={styles.balanceError}>Unable to load balance. Tap to retry.</Text>
@@ -802,13 +796,19 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
     paddingHorizontal: 16, paddingTop: 16, paddingBottom: 16,
+    width: "100%", maxWidth: 398, alignSelf: "center",
   },
   headerLeft: { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
   walletName: { fontSize: 17, fontFamily: "HankenGrotesk_600SemiBold", color: "#000000" },
 
   // Segment
   tabsWrapper: { position: "relative", marginBottom: 20 },
-  tabsScroll: { flexGrow: 0 },
+  tabsScroll: {
+    flexGrow: 0,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
+  },
   tabsContainer: { paddingHorizontal: 16, gap: 8 },
   tabIndicator: {
     position: "absolute", top: 0, bottom: 0,
@@ -824,7 +824,10 @@ const styles = StyleSheet.create({
   tabLabelActive: { color: "#7F56D9" },
 
   // Balance
-  balanceSection: { paddingHorizontal: 16, marginBottom: 16, gap: 4 },
+  balanceSection: {
+    paddingHorizontal: 16, marginBottom: 16, gap: 4,
+    width: "100%", maxWidth: 398, alignSelf: "center",
+  },
   balanceLabelRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   balanceLabel: { fontSize: 13, fontFamily: "HankenGrotesk_400Regular", color: "#626066" },
   strategyBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 100, borderWidth: 1 },
@@ -842,6 +845,7 @@ const styles = StyleSheet.create({
   // Zero balance
   zeroState: {
     flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32, paddingTop: 40, gap: 10,
+    width: "100%", maxWidth: 398, alignSelf: "center",
   },
   zeroTitle: { fontSize: 18, fontFamily: "HankenGrotesk_700Bold", color: "#000000" },
   zeroSubtitle: {
@@ -854,7 +858,10 @@ const styles = StyleSheet.create({
   zeroButtonText: { fontSize: 14, fontFamily: "HankenGrotesk_600SemiBold", color: "#7F56D9" },
 
   // Empty state (no wallet)
-  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, paddingHorizontal: 32 },
+  emptyState: {
+    flex: 1, alignItems: "center", justifyContent: "center", gap: 12, paddingHorizontal: 32,
+    width: "100%", maxWidth: 398, alignSelf: "center",
+  },
   emptyTitle: { fontSize: 20, fontFamily: "HankenGrotesk_700Bold", color: "#000000" },
   emptySubtitle: {
     fontSize: 14, fontFamily: "HankenGrotesk_400Regular", color: "#626066",

@@ -80,8 +80,6 @@ export function CustomTabBar({ state, navigation }: BottomTabBarProps) {
   const [containerWidth, setContainerWidth] = useState(0);
 
   const tabWidth = containerWidth / state.routes.length;
-  const extraLeft = state.index === 0 ? 20 : 0;
-  const extraRight = state.index === state.routes.length - 1 ? 20 : 0;
 
   // Animated selector position
   const selectorX = useRef(new Animated.Value(0)).current;
@@ -201,6 +199,12 @@ const styles = StyleSheet.create({
     height: 78,
     flexDirection: "row",
     alignItems: "center",
+    // Cap the tab pill to iPhone-Pro-Max width so it stays phone-sized on
+    // iPad (centered) instead of stretching across the whole screen. No-op
+    // on iPhone since 398pt is wider than any iPhone's interior width here.
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   tab: {
     flex: 1,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -13,15 +13,17 @@ import {
   PanResponder,
   KeyboardAvoidingView,
   Platform,
+  ImageBackground,
 } from "react-native";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Rect } from "react-native-svg";
 import { Image } from "expo-image";
-import { ImageBackground } from "react-native";
 import { useAuth } from "@/context/auth";
-import { API_BASE, DEVICE_ID } from "@/constants/api";
+import { API_BASE } from "@/constants/api";
 import { fetchJSON } from "@/lib/fetch";
+import { getDeviceId } from "@/lib/device-id";
+import { useQueries } from "@tanstack/react-query";
 
 // ─── Wallet Avatar ───────────────────────────────────────────────────────────
 
@@ -99,10 +101,6 @@ function SwipeableCard({
   // Swipe
   const translateX = useRef(new Animated.Value(0)).current;
   const isOpen = useRef(false);
-
-  // Exit animation
-  const heightAnim = useRef(new Animated.Value(1)).current;
-  const removing = useRef(false);
 
   // Active dot scale
   const dotScale = useRef(new Animated.Value(isActive ? 1 : 0)).current;
@@ -308,37 +306,29 @@ export default function WalletScreen() {
   const insets = useSafeAreaInsets();
   const { wallets, activeWalletId, setActiveWallet, removeWallet, renameWallet } = useAuth();
 
-  // Fetch balances for all wallets
-  const [balances, setBalances] = useState<Record<string, number>>({});
+  // Per-wallet balance queries — same key as portfolio.tsx so cache is shared.
+  const balanceQueries = useQueries({
+    queries: wallets.map((w) => ({
+      queryKey: ["portfolio", w.walletId] as const,
+      queryFn: async ({ signal }: { signal?: AbortSignal }) => {
+        const deviceId = await getDeviceId();
+        const json = await fetchJSON<{
+          portfolio?: { ticker: string; balance: number }[];
+        }>(
+          `${API_BASE}/mobile/user/wallet/portfolio?device_id=${deviceId}&wallet_address=${w.walletId}`,
+          { signal },
+        );
+        return json?.portfolio ?? [];
+      },
+    })),
+  });
 
-  const fetchBalances = useCallback(async () => {
-    await Promise.all(
-      wallets.map(async (w) => {
-        try {
-          const json = await fetchJSON<{ portfolio?: Array<{ ticker: string; balance: number }> }>(
-            `${API_BASE}/mobile/user/wallet/portfolio?device_id=${DEVICE_ID}&wallet_address=${w.walletId}`,
-          );
-          const allEntry = (json?.portfolio ?? []).find(
-            (p: { ticker: string; balance: number }) => p.ticker === "all",
-          );
-          if (allEntry) {
-            setBalances((prev) => ({ ...prev, [w.walletId]: allEntry.balance }));
-          }
-        } catch {
-          // silently ignore
-        }
-      }),
-    );
-  }, [wallets]);
-
-  const lastFetchedCount = useRef(0);
-  useEffect(() => {
-    if (wallets.length === 0) return;
-    // Only refetch if wallet count changed (added/removed)
-    if (lastFetchedCount.current === wallets.length) return;
-    lastFetchedCount.current = wallets.length;
-    fetchBalances();
-  }, [wallets.length, fetchBalances]);
+  const balances: Record<string, number> = {};
+  wallets.forEach((w, i) => {
+    const entries = balanceQueries[i]?.data;
+    const all = entries?.find((p) => p.ticker === "all");
+    if (all) balances[w.walletId] = all.balance;
+  });
 
   // Bottom sheet confirmation
   const [deleteTarget, setDeleteTarget] = useState<{ walletId: string; name: string } | null>(null);
@@ -566,6 +556,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 24,
     paddingBottom: 20,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   title: {
     fontSize: 24,
@@ -581,6 +574,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 12,
     paddingBottom: 120,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
 
   // Empty state

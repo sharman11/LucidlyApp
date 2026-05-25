@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Linking } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import {
   View,
@@ -11,12 +10,13 @@ import {
   ImageBackground,
   Animated,
   Easing,
+  Linking,
 } from "react-native";
 import { Image } from "expo-image";
 import { router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/context/auth";
-import { API_BASE, DEVICE_ID, VAULTS, ARCHIVED_VAULTS } from "@/constants/api";
+import { useVaultData } from "@/hooks/use-vault-data";
 import { AreaChart } from "@/components/ui/area-chart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SpinningLogoEgg } from "@/components/ui/spinning-logo-egg";
@@ -26,267 +26,33 @@ import {
   markSpinnerDiscovered,
 } from "@/lib/spinner-discovery";
 import Svg, { Path, Line } from "react-native-svg";
+import {
+  type VaultType,
+  type TvlPoint,
+  type ApyPoint,
+  type ApyMaWindow,
+  type AllocPoint,
+  type AllocView,
+  type DualPoint,
+  type IncentivePoint,
+  type AttrPoint,
+  type HealthSubTab,
+  type HealthPoint,
+  type HealthSnapshot,
+  type FaqItem,
+  type VaultDetails,
+  VAULT_STATIC,
+  VAULT_TAG,
+  VAULT_ACCENT,
+  STATIC_INCENTIVES,
+  ALLOC_VIEWS,
+  HEALTH_SUBTABS,
+  SCROLLABLE_TABS,
+  ACTIVE_COLOR,
+  INACTIVE_COLOR,
+  tabsForVault,
+} from "@/constants/yield-detail";
 
-// ─── Types & Constants ────────────────────────────────────────────────────────
-
-type VaultType =
-  | "syUSD"
-  | "syETH"
-  | "syBTC"
-  | "cyBTC"
-  | "cyETH"
-  | "jrRoyUSDC";
-
-const VAULT_STATIC: Record<
-  VaultType,
-  { address: string; icon: ReturnType<typeof require>; defaultName: string }
-> = {
-  syUSD: {
-    address: "0x279CAD277447965AF3d24a78197aad1B02a2c589",
-    icon: require("../assets/syusdIcon.svg"),
-    defaultName: "Stable Yield USD",
-  },
-  syETH: {
-    address: "0xEa96252EaBE2F2A0EA20ff42779CD985Ba596657",
-    icon: require("../assets/syethIcon.svg"),
-    defaultName: "Stable Yield ETH",
-  },
-  syBTC: {
-    address: "0xC0D48269f8d6E427B0637F5e0695De11C8E75F6c",
-    icon: require("../assets/sybtcIcon.svg"),
-    defaultName: "Stable Yield BTC",
-  },
-  cyBTC: {
-    address: "0x272BCD869CbDFcb32c335dB2f1F6C54Eb1A50aCc",
-    icon: require("../assets/cyBTCIcon.svg"),
-    defaultName: "Carry Yield BTC",
-  },
-  cyETH: {
-    address: "0x5373690c930553648f0aaA2e53B51f0C59290B7d",
-    icon: require("../assets/cyETHIcon.svg"),
-    defaultName: "Carry Yield ETH",
-  },
-  jrRoyUSDC: {
-    address: "0x71861827Aa95cA48148bdA0b40BC740d1c421070",
-    icon: require("../assets/jrRoyIcon.svg"),
-    defaultName: "Junior Royco USDC Vault",
-  },
-};
-
-// Default tab set (syUSD / stable-yield vaults).
-const TABS_DEFAULT = [
-  "TVL",
-  "APY",
-  "Allocations",
-  "Attribution",
-  "Incentives",
-  "Details",
-  "FAQ",
-];
-
-// Carry-yield vaults (cyBTC / cyETH) — Incentives replaced by Health Info.
-const TABS_CARRY = [
-  "TVL",
-  "APY",
-  "Allocations",
-  "Attribution",
-  "Health Info",
-  "Details",
-  "FAQ",
-];
-
-function tabsForVault(vault: VaultType): string[] {
-  return vault === "cyBTC" || vault === "cyETH" ? TABS_CARRY : TABS_DEFAULT;
-}
-
-// Strategy-type badge shown in the detail header — rendered at each SVG's
-// native size.
-const TAG_FLAGSHIP = {
-  source: require("../assets/flagshipTag.svg"),
-  width: 90,
-  height: 24,
-};
-const TAG_LOOP = {
-  source: require("../assets/loopTag.svg"),
-  width: 140,
-  height: 24,
-};
-const TAG_DELTA = {
-  source: require("../assets/deltaTag.svg"),
-  width: 122,
-  height: 24,
-};
-const TAG_TRANCHES = {
-  source: require("../assets/tranchesTag.svg"),
-  width: 122,
-  height: 24,
-};
-
-const VAULT_TAG: Record<
-  VaultType,
-  { source: number; width: number; height: number }
-> = {
-  syUSD: TAG_FLAGSHIP,
-  syETH: TAG_FLAGSHIP,
-  syBTC: TAG_FLAGSHIP,
-  cyBTC: TAG_LOOP,
-  cyETH: TAG_LOOP,
-  jrRoyUSDC: TAG_TRANCHES,
-};
-
-const SCROLLABLE_TABS = ["Incentives", "Details", "FAQ"];
-
-const ACTIVE_COLOR = "#7F56D9";
-const INACTIVE_COLOR = "#353140";
-
-// Per-vault accent color (matches the Yields card name color).
-const VAULT_ACCENT: Record<string, string> = Object.fromEntries(
-  [...VAULTS, ...ARCHIVED_VAULTS].map((v) => [v.type, v.nameColor]),
-);
-
-const STATIC_INCENTIVES: Record<VaultType, IncentivePoint[]> = {
-  syUSD: [
-    {
-      name: "KAT Incentives",
-      description: "Earn 10% Katana incentives as bonus",
-      image: "https://app.lucidly.finance/images/icons/katana.png",
-      multiplier: 0.1,
-    },
-    {
-      name: "InfiniFi Points",
-      description: "Points earned through protocol fund allocation",
-      image: require("../assets/infinifiIcon.svg"),
-      multiplier: 12,
-    },
-  ],
-  syETH: [],
-  syBTC: [],
-  cyBTC: [],
-  cyETH: [],
-  jrRoyUSDC: [],
-};
-
-// Display-fee overrides — the API's vault_config can be stale; these take
-// precedence over the fetched management/performance fee values.
-const FEE_OVERRIDES: Partial<
-  Record<VaultType, { managementFee?: string; performanceFee?: string }>
-> = {
-  syUSD: { managementFee: "0", performanceFee: "10" },
-  jrRoyUSDC: { managementFee: "0", performanceFee: "10" },
-};
-
-// Static Details overrides — for vaults whose vault_config is missing or stale.
-// Any field present here takes precedence over the fetched value.
-const DETAILS_OVERRIDES: Partial<
-  Record<
-    VaultType,
-    Partial<
-      Pick<
-        VaultDetails,
-        | "auditedBy"
-        | "deploymentDate"
-        | "rateProvider"
-        | "feeReceipt"
-        | "ownerAddress"
-      >
-    >
-  >
-> = {
-  jrRoyUSDC: {
-    auditedBy: "Pashov",
-    deploymentDate: "7 April 2026",
-    rateProvider: "0x0142d7E0787498c523c5E21c5BeCe9afDD82C6a3",
-    feeReceipt: "0x78acDecABb2Faa7d811b02937Db3806968c7dc2b",
-    ownerAddress: "0x0000000000000000000000000000000000000000",
-  },
-};
-
-// FAQ overrides — the API's vault_config FAQs can be stale; when an entry
-// exists here it fully replaces the fetched FAQ list for that vault.
-const FAQ_OVERRIDES: Partial<Record<VaultType, FaqItem[]>> = {
-  syUSD: [
-    {
-      question: "What is syUSD and how does it work?",
-      answer:
-        "syUSD is a USDC denominated yield token designed to earn risk adjusted returns across multiple bluechip DeFi protocols. It allocates deposits to leverage positions on lending markets like Morpho and AaveV3, combined with delta neutral strategies to generate yield while maintaining USD stability.",
-    },
-    {
-      question: "How is the yield generated?",
-      answer:
-        "The strategy generates yield through leveraged loop positions, and delta neutral arbitrage opportunities. Allocation decisions are made by the Lucidly team focusing on strategies with the lowest execution costs and highest risk adjusted returns.",
-    },
-    {
-      question: "What are the main risks?",
-      answer:
-        "Key risks include smart contract vulnerabilities in underlying protocols, liquidation risk from leveraged positions (mitigated by safeguards), and temporary depegging of stablecoins. The vault only takes exposure to bluechip collaterals to minimize risk.",
-    },
-    {
-      question: "How liquid is my position?",
-      answer:
-        "syUSD is fully liquid, you can redeem your position at any time through the Lucidly app. All transactions are executed onchain and can be verified via third-party portfolio indexers like DeBank.",
-    },
-    {
-      question: "Who manages the strategy allocations?",
-      answer:
-        "All allocation decisions are made by the Lucidly team using offchain algorithms for optimal capital deployment. The Manager smart contract executes transactions verified by Merkle proofs, with the vault restricted to calling whitelisted calldata.",
-    },
-    {
-      question: "Are there any fees?",
-      answer:
-        "Yes, Lucidly charges a 10% performance fee on yield generated, there is NO management fee. Exact fee structures are displayed in the app before depositing and are competitive with institutional grade yield products.",
-    },
-    {
-      question: "What is fast redeem?",
-      answer:
-        "Fast Redeem enables near-instant withdrawals using the vault's reserved USDC buffer. If your withdrawal amount is within the available buffer, it will be processed in the next cycle without impacting active strategies or requiring any position unwinding.",
-    },
-  ],
-  jrRoyUSDC: [
-    {
-      question: "What is Royco Jr USDC?",
-      answer:
-        "jrROYCO USDC is a Lucidly-managed USDC yield vault that takes structured first-loss positions on Royco Dawn's risk-tranched markets. You deposit USDC and receive jrROYCO USDC share tokens, which accrue value as the vault earns yield. The vault deploys into Junior tranches across three underlying yield sources (syrupUSDC, usdAI, and scUSD) and earns a continuously-paid risk premium from the corresponding Senior tranches in exchange for absorbing first-dollar losses on the underlying. Target net APY is ~10%.",
-    },
-    {
-      question: "What does first-loss actually mean?",
-      answer:
-        "Royco Dawn splits a single yield source into two risk slices: Senior and Junior. Senior holders earn a protected, lower yield. Junior holders (like this vault) act as first-loss capital: if the underlying strategy suffers a credit event or persistent drawdown, Junior absorbs those losses before Senior is ever touched, starting from the very first dollar. In exchange, Junior earns the full base yield of the underlying plus a risk premium paid continuously by Senior holders. The premium widens when Junior capital is scarce and tightens when abundant, creating a dynamic equilibrium. Dawn also has an observation window. Temporary volatility that reverses within the window does not impair Junior. Only persistent, realized losses are allocated to Junior.",
-    },
-    {
-      question: "Where does the yield come from?",
-      answer:
-        "The vault earns from three stacked components. First, base underlying yield: the lending or RWA yield each strategy produces (e.g. Maple borrower coupons inside syrupUSDC, compute-collateralized yield from usdAI, Sonic-native yield from scUSD). Second, a risk premium from Senior: a continuous spread paid by Senior holders to Junior for first-loss coverage, sized by Dawn's dynamic distribution curve. Third, capital efficiency from tranching: Junior backs a multiple of its own notional in Senior exposure, amplifying effective yield versus holding the underlying directly. Yield accrues to NAV block-by-block, so the jrROYCO USDC exchange rate increases continuously.",
-    },
-    {
-      question: "How does this relate to Dialectic's srRoyUSDC?",
-      answer:
-        "srRoyUSDC is the Senior counterparty vault, curated by Dialectic. It deposits into Senior tranches and earns a protected, lower yield, with Junior capital sitting underneath it as a buffer. jrROYCO USDC is the direct counterparty to that product. Without sufficient Junior capital, the Senior vault cannot scale and its yield compresses. By deploying first-loss capital into the same Royco markets, Lucidly's vault sits on the other side of the trade, taking on the structurally higher risk-adjusted yield in exchange for absorbing the tail risk Senior is paying to avoid. Same instrument, opposite tranche.",
-    },
-    {
-      question: "How do deposits and redemptions work?",
-      answer:
-        "Deposits are atomic: you deposit USDC and immediately receive jrROYCO USDC shares at the current exchange rate. The Lucidly strategist then routes USDC into the underlying assets and submits a deposit request to the Royco EntryPoint in the background. This delay is an internal allocation step and does not affect your shares. Redemptions follow a two-stage flow: you submit a withdrawal request to the Lucidly Queue, the solver batches it and calls requestRedemption on the Royco EntryPoint, and after Dawn's redemption delay your USDC is delivered. Total wait time is typically 24 to 72 hours depending on the market being unwound and queue batching. Cancellation hooks exist at every stage as a safeguard.",
-    },
-    {
-      question: "How is the vault secured?",
-      answer:
-        "Royco Junior USDC runs on the same Boring Vault architecture as Lucidly's other products, with all permissions gated by a merkle tree of pre-approved actions. Every on-chain action (approve, deposit, requestDeposit, executeDeposit, requestRedemption, cancel) must validate against the deployed leaf set. The strategist cannot add new venues or move capital outside the whitelisted call graph. The MPC owner key holds vault ownership while a separate strategy-manager role executes within the merkle root. Operational keys are stored in AWS KMS, never in plaintext. Any new underlying venue requires a 48-hour timelock before being added, and cancellation paths are whitelisted as escape hatches for stuck or mispriced requests.",
-    },
-    {
-      question: "What are the main risks I should know about?",
-      answer:
-        "First-loss exposure: if syrupUSDC, usdAI, or scUSD suffers a credit event or persistent drawdown beyond Dawn's observation window, the loss is absorbed by Junior (this vault) pro-rata before Senior is touched. Observation-window risk: transient volatility is protected, but a drawdown that survives the window becomes a permanent reduction in Junior NAV. Smart contract risk: three layers exist (the Lucidly Boring Vault, Royco Dawn's tranche contracts, and the underlying protocols); each is independently audited but the composition adds surface area. Liquidity risk in stress: during a drawdown-and-observation period, the strategist may pause or queue redemptions to avoid forced liquidation at impaired prices. This is a higher-risk product than syUSD. Capital is exposed to the possibility of permanent principal loss and is appropriate only for capital that can tolerate drawdown in exchange for double-digit USD yield.",
-    },
-  ],
-};
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatTVL(value: number): string {
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `$${Math.round(value / 1_000)}K`;
-  return `$${Math.round(value).toLocaleString("en-US")}`;
-}
 
 // ─── Skeleton variants & FadeIn ──────────────────────────────────────────────
 
@@ -336,16 +102,6 @@ function FadeIn({ children, visible }: { children: React.ReactNode; visible: boo
   return <Animated.View style={{ flex: 1, opacity }}>{children}</Animated.View>;
 }
 
-function ErrorRetry({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10 }}>
-      <Text style={{ fontSize: 13, fontFamily: "HankenGrotesk_500Medium", color: "#9B97A6" }}>{message}</Text>
-      <TouchableOpacity onPress={onRetry} activeOpacity={0.7} style={{ paddingHorizontal: 16, paddingVertical: 8, borderRadius: 100, backgroundColor: "#E2D9F9" }}>
-        <Text style={{ fontSize: 12, fontFamily: "HankenGrotesk_600SemiBold", color: "#7F56D9" }}>Tap to retry</Text>
-      </TouchableOpacity>
-    </View>
-  );
-}
 
 // ─── Nav Icons (mirrored from custom-tab-bar) ─────────────────────────────────
 
@@ -406,8 +162,6 @@ function WalletIcon({ color }: { color: string }) {
 }
 
 // ─── TVL Chart ────────────────────────────────────────────────────────────────
-
-type TvlPoint = { date: string; usd: number; base: number };
 
 function TVLChart({
   data,
@@ -668,9 +422,6 @@ const tvlStyles = StyleSheet.create({
 
 // ─── APY Chart ────────────────────────────────────────────────────────────────
 
-type ApyPoint = { timestamp: string; apy: number };
-type ApyMaWindow = "7d" | "30d";
-
 const APY_MA_OPTS: Array<{ key: ApyMaWindow; label: string }> = [
   { key: "7d", label: "7D MA" },
   { key: "30d", label: "30D MA" },
@@ -861,11 +612,6 @@ const apyStyles = StyleSheet.create({
 });
 
 // ─── Allocations Chart ───────────────────────────────────────────────────────
-
-type AllocPoint = {
-  date: string;
-  allocations: { allocation: string; aum: number }[];
-};
 
 const ALLOC_COLORS = [
   "#8BA5E8",
@@ -1080,11 +826,6 @@ const allocStyles = StyleSheet.create({
 });
 
 // ─── Carry Allocations (Assets & Liabilities + Holdings) ─────────────────────
-
-const ALLOC_VIEWS = ["Assets & liabilities", "Holdings"] as const;
-type AllocView = (typeof ALLOC_VIEWS)[number];
-
-type DualPoint = { date: string; assets: number; liabilities: number };
 
 function AssetsLiabilitiesChart({
   data,
@@ -1358,14 +1099,6 @@ const carryAllocStyles = StyleSheet.create({
 
 // ─── Incentives Grid ─────────────────────────────────────────────────────────
 
-type IncentivePoint = {
-  name: string;
-  description: string;
-  image: string | number;
-  multiplier: number;
-  link?: string;
-};
-
 function IncentivesGrid({ data }: { data: IncentivePoint[] }) {
   if (data.length === 0) {
     return (
@@ -1390,7 +1123,7 @@ function IncentivesGrid({ data }: { data: IncentivePoint[] }) {
               source={require("../assets/incentiveBG.png")}
               style={incentiveStyles.card}
               imageStyle={incentiveStyles.cardBg}
-              resizeMode="cover"
+              resizeMode="stretch"
             >
               <View style={incentiveStyles.cardInner}>
                 {/* Top: image + multiplier */}
@@ -1437,6 +1170,9 @@ function IncentivesGrid({ data }: { data: IncentivePoint[] }) {
 const incentiveStyles = StyleSheet.create({
   grid: {
     gap: 12,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   row: {
     flexDirection: "row",
@@ -1509,16 +1245,6 @@ const incentiveStyles = StyleSheet.create({
 });
 
 // ─── Attribution Chart ───────────────────────────────────────────────────────
-
-type AttrPoint = {
-  date: string;
-  strategies: {
-    strategy_name: string;
-    yield_in_dollars: number;
-    strategy_id: string;
-  }[];
-  vault_total_yield: number;
-};
 
 const ATTR_COLORS = [
   "#5B8EE6",
@@ -1770,29 +1496,6 @@ const attrStyles = StyleSheet.create({
 });
 
 // ─── Health Info Chart ───────────────────────────────────────────────────────
-
-const HEALTH_SUBTABS = ["LTV", "Net Carry"] as const;
-type HealthSubTab = (typeof HEALTH_SUBTABS)[number];
-
-type HealthPoint = { date: string; value: number };
-
-// One carry-vault snapshot, projected onto the two Health Info metrics.
-type HealthSnapshot = {
-  date: string;
-  ltv: number;
-  netCarry: number;
-  assets: number;
-  liabilities: number;
-};
-
-// Raw shape of a `/vault/carry` snapshot from the API.
-type RawCarrySnapshot = {
-  timestamp: string;
-  ltv: number;
-  credit_in_usdc: number;
-  debt_in_usdc: number;
-  collateral_in_usdc: number;
-};
 
 function formatHealthValue(value: number, subTab: HealthSubTab): string {
   return subTab === "LTV"
@@ -2048,8 +1751,6 @@ const healthStyles = StyleSheet.create({
 
 // ─── FAQ Tab ─────────────────────────────────────────────────────────────────
 
-type FaqItem = { question: string; answer: string };
-
 function FaqAccordion({ item }: { item: FaqItem }) {
   const [open, setOpen] = useState(false);
 
@@ -2119,6 +1820,9 @@ const faqStyles = StyleSheet.create({
   },
   list: {
     gap: 10,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   item: {
     backgroundColor: "#F4F0FF",
@@ -2158,20 +1862,6 @@ const faqStyles = StyleSheet.create({
 });
 
 // ─── Details Tab ─────────────────────────────────────────────────────────────
-
-type VaultDetails = {
-  address: string;
-  auditedBy: string;
-  deploymentDate: string;
-  managementFee: string;
-  performanceFee: string;
-  rateProvider: string;
-  feeReceipt: string;
-  ownerAddress: string;
-  sharePrice: string;
-  baseAsset: string;
-  symbol: string;
-};
 
 function truncateAddr(addr: string): string {
   if (!addr || addr.length < 10) return addr;
@@ -2343,6 +2033,9 @@ const detailStyles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#D8CCF6",
     overflow: "hidden",
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   contractRow: {
     flexDirection: "row",
@@ -2440,30 +2133,33 @@ export default function YieldDetailScreen() {
   const vaultType: VaultType = VAULT_STATIC[requestedType]
     ? requestedType
     : "syUSD";
-  const symbol = vaultType.toLowerCase();
   const config = VAULT_STATIC[vaultType];
 
-  const [vaultName, setVaultName] = useState(config.defaultName);
-  const [ticker, setTicker] = useState(vaultType);
-  const [tvl, setTvl] = useState("$0");
-  const [apy, setApy] = useState("—");
-  const [balance, setBalance] = useState("--");
-  const [tvlHistory, setTvlHistory] = useState<TvlPoint[]>([]);
-  const [tvlBaseCurrency, setTvlBaseCurrency] = useState("USD");
-  const [tvlLoading, setTvlLoading] = useState(false);
-  const [apyHistory, setApyHistory] = useState<ApyPoint[]>([]);
-  const [apyLoading, setApyLoading] = useState(false);
   const [apyMaWindow, setApyMaWindow] = useState<ApyMaWindow>("7d");
-  const [allocHistory, setAllocHistory] = useState<AllocPoint[]>([]);
-  const [allocLoading, setAllocLoading] = useState(false);
-  const [attrHistory, setAttrHistory] = useState<AttrPoint[]>([]);
-  const [attrLoading, setAttrLoading] = useState(false);
-  const [healthHistory, setHealthHistory] = useState<HealthSnapshot[]>([]);
-  const [healthLoading, setHealthLoading] = useState(false);
   const incentives = STATIC_INCENTIVES[vaultType];
-  const [vaultDetails, setVaultDetails] = useState<VaultDetails | null>(null);
-  const [detailsLoading, setDetailsLoading] = useState(false);
-  const [faqs, setFaqs] = useState<FaqItem[]>([]);
+
+  const {
+    vaultName,
+    ticker,
+    tvl,
+    apy,
+    balance,
+    tvlHistory,
+    tvlBaseCurrency,
+    tvlLoading,
+    apyHistory,
+    apyLoading,
+    allocHistory,
+    allocLoading,
+    attrHistory,
+    attrLoading,
+    healthHistory,
+    healthLoading,
+    vaultDetails,
+    detailsLoading,
+    faqs,
+  } = useVaultData(vaultType, apyMaWindow, activeWallet?.walletId ?? null);
+
   const detailTabs = tabsForVault(vaultType);
   const [activeTab, setActiveTab] = useState(detailTabs[0]);
   const [depositModal, setDepositModal] = useState(false);
@@ -2498,285 +2194,6 @@ export default function YieldDetailScreen() {
   }, [activeTab, detailTabLayouts]);
   const [navWidth, setNavWidth] = useState(0);
 
-  useEffect(() => {
-    fetchAll();
-    fetchTVLHistory();
-    fetchAllocHistory();
-    fetchAttrHistory();
-    fetchHealthHistory();
-    fetchDetails();
-  }, [vaultType, activeWallet?.walletId]);
-
-  // APY refetches on its own when the moving-average window changes.
-  useEffect(() => {
-    fetchAPYHistory(apyMaWindow);
-  }, [vaultType, apyMaWindow]);
-
-  async function fetchTVLHistory() {
-    setTvlLoading(true);
-    try {
-      const res = await fetch(
-        `${API_BASE}/vault/daily_tvl?strategyAddress=${config.address}`,
-      );
-      const json = await res.json();
-      const arr = Array.isArray(json) ? json : (json?.result ?? []);
-      // `tvl` is in the vault's base currency (BTC/ETH for carry vaults);
-      // `tvl_usd` is always USD. Keep both so the chart can toggle.
-      setTvlBaseCurrency(arr[0]?.base_currency ?? "USD");
-      setTvlHistory(
-        arr.map(
-          (item: {
-            date: string;
-            tvl: string | number;
-            tvl_usd?: string | number;
-          }) => ({
-            date: item.date,
-            usd: parseFloat(String(item.tvl_usd ?? item.tvl)) || 0,
-            base: parseFloat(String(item.tvl)) || 0,
-          }),
-        ),
-      );
-    } catch {
-      setTvlHistory([]);
-    } finally {
-      setTvlLoading(false);
-    }
-  }
-
-  async function fetchAPYHistory(window: ApyMaWindow) {
-    setApyLoading(true);
-    try {
-      const res = await fetch(
-        `${API_BASE}/vault/apy_history?vaultAddress=${config.address}&duration=${window}&period=daily`,
-      );
-      const json = await res.json();
-      const arr = json?.result ?? [];
-      setApyHistory(
-        arr.map((item: { timestamp: string; ma_apy_annualized: number }) => ({
-          timestamp: item.timestamp,
-          apy: item.ma_apy_annualized ?? 0,
-        })),
-      );
-    } catch {
-      setApyHistory([]);
-    } finally {
-      setApyLoading(false);
-    }
-  }
-
-  async function fetchAllocHistory() {
-    setAllocLoading(true);
-    try {
-      const res = await fetch(
-        `${API_BASE}/vault/allocations_daily?vaultAddress=${config.address}`,
-      );
-      const json = await res.json();
-      const arr = Array.isArray(json) ? json : (json?.result ?? []);
-      setAllocHistory(
-        arr.map(
-          (item: {
-            date: string;
-            allocations: { allocation: string; aum: number }[];
-          }) => ({
-            date: item.date,
-            allocations: (item.allocations ?? []).map((a) => ({
-              allocation: a.allocation,
-              aum: a.aum ?? 0,
-            })),
-          }),
-        ),
-      );
-    } catch {
-      setAllocHistory([]);
-    } finally {
-      setAllocLoading(false);
-    }
-  }
-
-  // Carry-vault health metrics (LTV / Net Carry) over the last 45 days.
-  async function fetchHealthHistory() {
-    if (vaultType !== "cyBTC" && vaultType !== "cyETH") return;
-    setHealthLoading(true);
-    try {
-      const end = Math.floor(Date.now() / 1000);
-      const start = end - 45 * 24 * 60 * 60;
-      const res = await fetch(
-        `${API_BASE}/vault/carry?vaultAddress=${config.address}&start=${start}&end=${end}`,
-      );
-      const json = await res.json();
-      const arr: RawCarrySnapshot[] = Array.isArray(json)
-        ? json
-        : (json?.result ?? []);
-      setHealthHistory(
-        arr.map((item) => ({
-          date: item.timestamp,
-          ltv: (item.ltv ?? 0) * 100,
-          netCarry: (item.credit_in_usdc ?? 0) - (item.debt_in_usdc ?? 0),
-          assets: item.collateral_in_usdc ?? 0,
-          liabilities: item.debt_in_usdc ?? 0,
-        })),
-      );
-    } catch {
-      setHealthHistory([]);
-    } finally {
-      setHealthLoading(false);
-    }
-  }
-
-  async function fetchAttrHistory() {
-    setAttrLoading(true);
-    try {
-      const res = await fetch(
-        `${API_BASE}/vault/return_attribution?vaultAddress=${config.address}`,
-      );
-      const json = await res.json();
-      const arr = Array.isArray(json) ? json : (json?.result ?? []);
-      setAttrHistory(
-        arr.map(
-          (item: {
-            date: string;
-            strategies: {
-              strategy_name: string;
-              yield_in_dollars: number;
-              strategy_id: string;
-            }[];
-            vault_total_yield: number;
-          }) => ({
-            date: item.date,
-            strategies: item.strategies ?? [],
-            vault_total_yield: item.vault_total_yield ?? 0,
-          }),
-        ),
-      );
-    } catch {
-      setAttrHistory([]);
-    } finally {
-      setAttrLoading(false);
-    }
-  }
-
-  async function fetchDetails() {
-    setDetailsLoading(true);
-    try {
-      const [configRes, rateRes] = await Promise.all([
-        fetch(
-          `${API_BASE}/vault_config?vaultSymbol=${symbol}`,
-        ),
-        fetch(
-          `${API_BASE}/exchange_rates?vaultAddress=${config.address}`,
-        ),
-      ]);
-      // Parse each response defensively — a failing endpoint (e.g. a 500 on
-      // exchange_rates) must not blank the whole Details/FAQ tab.
-      const configJson = await configRes.json().catch(() => null);
-      const rateJson = await rateRes.json().catch(() => null);
-
-      const vc =
-        configJson?.result?.vault_constants ??
-        configJson?.vault_constants ??
-        {};
-      const rate: number = rateJson?.result ?? 1;
-
-      const detailsOverride = DETAILS_OVERRIDES[vaultType];
-      setVaultDetails({
-        address: vc.address ?? config.address,
-        auditedBy:
-          detailsOverride?.auditedBy ??
-          (vc.audited_by ? `${vc.audited_by} Audit Group` : "—"),
-        deploymentDate:
-          detailsOverride?.deploymentDate ?? vc.deployment_date ?? "—",
-        managementFee:
-          FEE_OVERRIDES[vaultType]?.managementFee ??
-          vc.management_fee ??
-          "0",
-        performanceFee:
-          FEE_OVERRIDES[vaultType]?.performanceFee ??
-          vc.performance_fee ??
-          "0",
-        rateProvider: detailsOverride?.rateProvider ?? vc.rate_provider ?? "—",
-        feeReceipt: detailsOverride?.feeReceipt ?? vc.fee_payout ?? "—",
-        ownerAddress: detailsOverride?.ownerAddress ?? vc.owner ?? "—",
-        sharePrice: rate.toFixed(4),
-        baseAsset: vc.base_asset?.asset ?? "USDC",
-        symbol: vc.symbol ?? vaultType,
-      });
-
-      const rawFaqs: { question: string; answer: string }[] =
-        vc.faqs ?? configJson?.result?.faqs ?? [];
-      const faqOverride = FAQ_OVERRIDES[vaultType];
-      setFaqs(
-        faqOverride ??
-          rawFaqs.map((f) => ({ question: f.question, answer: f.answer })),
-      );
-    } catch {
-      setVaultDetails(null);
-      // Static FAQ overrides should still render even if the fetch fails.
-      setFaqs(FAQ_OVERRIDES[vaultType] ?? []);
-    } finally {
-      setDetailsLoading(false);
-    }
-  }
-
-  async function fetchAll() {
-    // API 1: Vault Config
-    try {
-      const res = await fetch(
-        `${API_BASE}/vault_config?vaultSymbol=${symbol}`,
-      );
-      const json = await res.json();
-      const cfg = json?.result ?? json;
-      if (cfg?.vault_constants?.name) setVaultName(cfg.vault_constants.name);
-      if (cfg?.vault_constants?.symbol) setTicker(cfg.vault_constants.symbol);
-      // legacy flat shape fallback
-      if (!cfg?.vault_constants && json?.name) setVaultName(json.name);
-      if (!cfg?.vault_constants && json?.symbol) setTicker(json.symbol);
-    } catch {}
-
-    // API 2: TVL (strategy-specific)
-    try {
-      const d = new Date();
-      const dateParam = encodeURIComponent(
-        `${d.getDate()} ${d.toLocaleString("en-US", { month: "long" })},${d.getFullYear()}`,
-      );
-      const res = await fetch(
-        `${API_BASE}/vault/daily_tvl?strategyAddress=${config.address}&start=${dateParam}&end=${dateParam}`,
-      );
-      const json = await res.json();
-      const arr = Array.isArray(json) ? json : json?.result;
-      const latest =
-        Array.isArray(arr) && arr.length > 0 ? arr[arr.length - 1] : null;
-      setTvl(formatTVL(parseFloat(latest?.tvl_usd ?? latest?.tvl) || 0));
-    } catch {
-      setTvl("$0");
-    }
-
-    // API 3: APY 7d
-    try {
-      const res = await fetch(
-        `${API_BASE}/vault/apy?vaultAddress=${config.address}&duration=30d`,
-      );
-      const json = await res.json();
-      const raw = json?.result?.trailing_total_APY;
-      if (raw != null) setApy(Number(raw).toFixed(2) + "%");
-    } catch {}
-
-    // API 4: Portfolio balance for this vault
-    if (activeWallet) {
-      try {
-        const res = await fetch(
-          `${API_BASE}/mobile/user/wallet/portfolio?device_id=${DEVICE_ID}&wallet_address=${activeWallet.walletId}`,
-        );
-        const json = await res.json();
-        const entry = (json?.portfolio ?? []).find(
-          (p: { ticker: string; balance: number }) => p.ticker === vaultType,
-        );
-        const bal = entry?.balance ?? 0;
-        setBalance(bal > 0 ? formatTVL(bal) : "--");
-      } catch {
-        setBalance("--");
-      }
-    }
-  }
 
   const navTabWidth = navWidth / NAV_TABS.length;
 
@@ -2845,7 +2262,7 @@ export default function YieldDetailScreen() {
         source={require("../assets/detailCardBG.png")}
         style={styles.statsCard}
         imageStyle={styles.statsCardBg}
-        resizeMode="cover"
+        resizeMode="stretch"
       >
         <View style={styles.statItem}>
           <Text style={styles.statValue}>{tvl}</Text>
@@ -3065,7 +2482,7 @@ export default function YieldDetailScreen() {
 
       <SpinningLogoEgg
         visible={logoEgg}
-        icon={config.icon as number}
+        icon={config.icon}
         accent={VAULT_ACCENT[vaultType]}
         onClose={() => setLogoEgg(false)}
       />
@@ -3088,6 +2505,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 20,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   // Hero
   hero: {
@@ -3096,6 +2516,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingBottom: 16,
     gap: 12,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   vaultIcon: {
     width: 44,
@@ -3140,6 +2563,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 16,
     marginBottom: 20,
+    // Phone-sized on iPad: card caps at the same effective width an iPhone
+    // Pro Max would render (430 screen − 32 horiz margin = 398). On smaller
+    // iPhones the natural width is already below 398, so unchanged.
+    maxWidth: 398,
+    alignSelf: "center",
+    width: "100%",
   },
   statsCardBg: {
     borderRadius: 16,
@@ -3169,6 +2598,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 6,
     marginBottom: 16,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   titleText: {
     fontSize: 14,
@@ -3185,6 +2617,9 @@ const styles = StyleSheet.create({
   tabsScroll: {
     flexGrow: 0,
     marginBottom: 4,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   tabsContainer: {
     paddingHorizontal: 16,
@@ -3253,6 +2688,11 @@ const styles = StyleSheet.create({
     height: 78,
     flexDirection: "row",
     alignItems: "center",
+    // Same cap as the main bottom nav so this yield-detail copy stays
+    // phone-sized on iPad (centered) instead of stretching.
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   navSelector: {
     position: "absolute",

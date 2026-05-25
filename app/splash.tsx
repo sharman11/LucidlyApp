@@ -115,7 +115,7 @@ function LogoCycler() {
 }
 
 export default function SplashScreen() {
-  const { wallets, ready } = useAuth();
+  const { ready } = useAuth();
 
   // Entrance animations
   const opacity = useRef(new Animated.Value(0)).current;
@@ -154,10 +154,8 @@ export default function SplashScreen() {
       if (hasNavigated.current) return;
       hasNavigated.current = true;
 
-      const destination =
-        wallets.length > 0 ? "/(tabs)/yields" : "/enter-app";
-
-      // Exit burst: scale up + fade out, then navigate
+      // Always land on the main Yields screen. The bottom-nav Wallet tab
+      // funnels users without a linked wallet to /login on demand.
       Animated.parallel([
         Animated.timing(exitScale, {
           toValue: 1.6,
@@ -172,7 +170,7 @@ export default function SplashScreen() {
           useNativeDriver: true,
         }),
       ]).start(() => {
-        router.replace(destination);
+        router.replace("/(tabs)/yields");
       });
     };
 
@@ -187,7 +185,7 @@ export default function SplashScreen() {
     // Safety: don't wait forever — navigate after MAX_SPLASH_MS
     const fallback = setTimeout(navigate, MAX_SPLASH_MS);
     return () => clearTimeout(fallback);
-  }, [ready, wallets.length]);
+  }, [ready]);
 
   return (
     <View style={styles.container}>

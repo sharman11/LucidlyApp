@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useQueryClient } from '@tanstack/react-query';
+import { migrateLegacyWallets } from '@/lib/device-id';
 
 const STORAGE_KEY = 'lucidly_wallets';
 const ACTIVE_KEY = 'lucidly_active_wallet';
@@ -35,6 +37,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [activeWalletId, setActiveWalletIdState] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const queryClient = useQueryClient();
 
   // Load from storage on mount
   useEffect(() => {
@@ -53,6 +56,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           } else if (parsed.length > 0) {
             setActiveWalletIdState(parsed[0].walletId);
           }
+          // One-time migration: wallets linked under the legacy shared device_id
+          // need to be re-registered under the new per-install UUID before
+          // /portfolio will accept them. After migration succeeds, invalidate
+          // portfolio caches so any already-errored queries auto-retry.
+          migrateLegacyWallets(parsed).then(() => {
+            queryClient.invalidateQueries({ queryKey: ["portfolio"] });
+          });
         }
       } catch {
         // silently ignore
@@ -61,7 +71,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }
     load();
-  }, []);
+  }, [queryClient]);
 
   const persist = async (updated: Wallet[], activeId: string | null) => {
     try {

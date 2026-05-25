@@ -135,19 +135,22 @@ const CARD_BASE_W = 163;
 const CARD_BASE_H = 127;
 const CARD_BG_W = 179;
 const CARD_BG_H = 143;
-const CARD_SHADOW = 8;
 const SCREEN_EDGE = 16;
 const COL_GAP = 16;
 const ROW_GAP = 16;
 
 function useCardSize() {
   const { width: screenW } = useWindowDimensions();
+  // Cap at iPhone-Pro-Max width so cards stay phone-sized on iPad instead
+  // of scaling up to fill the tablet screen.
+  const effectiveW = Math.min(screenW, 398);
   // Flex treats each wrapper as the visible-card size so two cards + 16 px
-  // edges + 16 px column gap exactly fit the screen. The wrapper itself
-  // renders bigger (full SVG/PNG canvas) via negative margins, so the shadow
-  // extends into the screen-edge and column-gap area without overflowing.
+  // edges + 16 px column gap exactly fit the (capped) width. The wrapper
+  // itself renders bigger (full SVG/PNG canvas) via negative margins, so the
+  // shadow extends into the screen-edge and column-gap area without
+  // overflowing.
   const visibleW = Math.floor(
-    (screenW - SCREEN_EDGE * 2 - COL_GAP) / 2,
+    (effectiveW - SCREEN_EDGE * 2 - COL_GAP) / 2,
   );
   const visibleH = Math.round((visibleW * CARD_BASE_H) / CARD_BASE_W);
   const wrapperW = Math.round((visibleW * CARD_BG_W) / CARD_BASE_W);
@@ -263,9 +266,14 @@ export default function YieldsScreen() {
           );
           const raw = json?.result?.trailing_total_APY;
           if (raw != null) {
+            // A negative APY usually reflects a transient mark on the
+            // strategy — show a dash rather than a number that would alarm
+            // depositors.
+            const display =
+              Number(raw) < 0 ? "—" : Number(raw).toFixed(2) + "%";
             setApys((prev) => ({
               ...prev,
-              [v.type]: Number(raw).toFixed(2) + "%",
+              [v.type]: display,
             }));
           } else {
             errors[v.type] = true;
@@ -664,6 +672,9 @@ const styles = StyleSheet.create({
   },
   tabsScroll: {
     flexGrow: 0,
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   tabsContainer: {
     paddingHorizontal: 16,
@@ -722,6 +733,11 @@ const styles = StyleSheet.create({
     columnGap: COL_GAP,
     rowGap: ROW_GAP,
     overflow: "visible",
+    // Cap at phone width so the 2-column grid stays phone-sized on iPad
+    // (centered) instead of letting cards drift apart across the screen.
+    width: "100%",
+    maxWidth: 398,
+    alignSelf: "center",
   },
   cardWrapper: {
     position: "relative",

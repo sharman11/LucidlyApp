@@ -1,8 +1,4 @@
-import { Platform } from "react-native";
-
 export const API_BASE = "https://api.lucidly.finance/services";
-
-export const DEVICE_ID = `lucidly-${Platform.OS}`;
 
 export type VaultCategory =
   | "flagship"

@@ -16,7 +16,8 @@ import Svg, { Path, G, ClipPath, Rect, Defs } from "react-native-svg";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/context/auth";
-import { API_BASE, DEVICE_ID } from "@/constants/api";
+import { API_BASE } from "@/constants/api";
+import { getDeviceId } from "@/lib/device-id";
 
 const { height: SCREEN_HEIGHT } = Dimensions.get("window");
 const WALLET_REGEX = /^0x[0-9a-fA-F]{40}$/;
@@ -332,9 +333,10 @@ export default function LoginScreen() {
 
     setLoading(true);
     try {
+      const deviceId = await getDeviceId();
       // Step 1: Check if wallet exists on this device via GET
       const getRes = await fetch(
-        `${API_BASE}/mobile/user/wallets/${DEVICE_ID}`,
+        `${API_BASE}/mobile/user/wallets/${deviceId}`,
       );
       if (getRes.ok) {
         const getJson = await getRes.json();
@@ -357,7 +359,7 @@ export default function LoginScreen() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            device_id: DEVICE_ID,
+            device_id: deviceId,
             wallet_address: trimmedId,
             wallet_name: trimmedName,
           }),

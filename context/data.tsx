@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
+import React, { createContext, useContext, useCallback } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "./auth";
 import { API_BASE } from "@/constants/api";
 import { fetchJSON } from "@/lib/fetch";
@@ -27,61 +28,64 @@ const DataContext = createContext<DataContextType>({
   refresh: () => {},
 });
 
+// ─── Query keys ──────────────────────────────────────────────────────────────
+
+export const dataKeys = {
+  points: (walletId: string) => ["points", walletId] as const,
+  referral: (walletId: string) => ["referral", walletId] as const,
+};
+
 // ─── Provider ────────────────────────────────────────────────────────────────
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const { wallets, activeWalletId } = useAuth();
   const activeWallet =
     wallets.find((w) => w.walletId === activeWalletId) ?? wallets[0] ?? null;
+  const walletId = activeWallet?.walletId ?? null;
 
-  const [points, setPoints] = useState<PointsResult | null>(null);
-  const [pointsLoading, setPointsLoading] = useState(false);
-  const [referralCode, setReferralCode] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
-  const fetchIdRef = useRef(0);
+  const pointsQuery = useQuery({
+    queryKey: walletId ? dataKeys.points(walletId) : ["points", "none"],
+    queryFn: async ({ signal }) => {
+      const json = await fetchJSON<{ result?: PointsResult }>(
+        `${API_BASE}/user/points?userAddress=${walletId}`,
+        { signal },
+      );
+      return json?.result ?? null;
+    },
+    enabled: !!walletId,
+    // Points are the slow (~15s) endpoint — cache aggressively.
+    staleTime: 60_000,
+  });
 
-  const fetchAll = useCallback((walletId: string) => {
-    const id = ++fetchIdRef.current;
-    const stale = () => fetchIdRef.current !== id;
-
-    setPoints(null);
-    setPointsLoading(true);
-    setReferralCode(null);
-
-    // Points (slow ~15s) — biggest win from prefetching
-    fetchJSON<{ result?: PointsResult }>(
-      `${API_BASE}/user/points?userAddress=${walletId}`,
-    )
-      .then((json) => {
-        if (!stale()) setPoints(json?.result ?? null);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!stale()) setPointsLoading(false);
-      });
-
-    // Referral code
-    fetchJSON<{ result?: { ref_code?: string } }>(
-      `${API_BASE}/user/referral/code?wallet_address=${walletId}`,
-    )
-      .then((json) => {
-        if (!stale()) setReferralCode(json?.result?.ref_code ?? null);
-      })
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    if (!activeWallet) return;
-    fetchAll(activeWallet.walletId);
-  }, [activeWallet?.walletId, fetchAll]);
+  const referralQuery = useQuery({
+    queryKey: walletId ? dataKeys.referral(walletId) : ["referral", "none"],
+    queryFn: async ({ signal }) => {
+      const json = await fetchJSON<{ result?: { ref_code?: string } }>(
+        `${API_BASE}/user/referral/code?wallet_address=${walletId}`,
+        { signal },
+      );
+      return json?.result?.ref_code ?? null;
+    },
+    enabled: !!walletId,
+    staleTime: 5 * 60_000,
+  });
 
   const refresh = useCallback(() => {
-    if (activeWallet) fetchAll(activeWallet.walletId);
-  }, [activeWallet?.walletId, fetchAll]);
+    if (!walletId) return;
+    queryClient.invalidateQueries({ queryKey: dataKeys.points(walletId) });
+    queryClient.invalidateQueries({ queryKey: dataKeys.referral(walletId) });
+  }, [queryClient, walletId]);
 
   return (
     <DataContext.Provider
-      value={{ points, pointsLoading, referralCode, refresh }}
+      value={{
+        points: pointsQuery.data ?? null,
+        pointsLoading: pointsQuery.isPending && !!walletId,
+        referralCode: referralQuery.data ?? null,
+        refresh,
+      }}
     >
       {children}
     </DataContext.Provider>
